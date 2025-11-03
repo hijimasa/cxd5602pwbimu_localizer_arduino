@@ -2,7 +2,7 @@
 
 English | [日本語](./README_jp.md)
 
-This repository contains an Arduino IDE project for the Spresense board that uses the onboard IMU (Inertial Measurement Unit) to perform sensor-based self-localization. The project demonstrates sensor fusion techniques, including calibration, filtering, and orientation estimation, to estimate acceleration, velocity, and position.
+This repository contains an Arduino IDE project for the Spresense board that uses the onboard IMU (Inertial Measurement Unit) to perform sensor-based self-localization. The project demonstrates sensor fusion techniques using the **Fusion library**, including calibration, filtering, and orientation estimation, to estimate acceleration, velocity, and position.
 
 ## Overview
 
@@ -10,17 +10,21 @@ The code reads raw IMU data (acceleration, rotation speed, and temperature) from
 
 - **Calibration & Initialization:** The IMU sensor data is averaged over a predefined measurement period to determine the initial bias and orientation.
 - **Filtering:** A causal Gaussian filter is applied to smooth the sensor readings.
-- **Orientation Estimation:** The program uses quaternion representations and the Madgwick filter method to fuse accelerometer and gyroscope data. The quaternion update is computed using the Runge–Kutta (RK4) method.
-- **Zero Velocity Correction:** A zero-velocity update is implemented to reset drift when the sensor readings indicate near-zero movement.
-- **Position Estimation:** Velocity and position are updated using a simple Euler integration based on the corrected acceleration values.
+- **Orientation Estimation:** The program uses the **Fusion AHRS (Attitude and Heading Reference System)** library to fuse accelerometer and gyroscope data, providing robust quaternion-based orientation estimation with intelligent accelerometer rejection during motion.
+- **Gyroscope Bias Compensation:** Runtime gyroscope offset correction is performed using the Fusion library's FusionOffset algorithm.
+- **Acceleration Bias Correction:** An adaptive bias correction mechanism continuously updates acceleration bias during stationary periods.
+- **Zero Velocity Update (ZUPT):** A zero-velocity update is implemented to reset drift when the sensor readings indicate near-zero movement, based on acceleration and gyroscope magnitude thresholds.
+- **Position Estimation:** Velocity and position are updated using trapezoidal integration based on the corrected acceleration values.
 
 ## Features
 
 - **IMU Data Acquisition:** Reads acceleration, gyroscope, and temperature data from the Spresense IMU.
-- **Sensor Fusion:** Combines accelerometer and gyroscope data with calibration to provide reliable estimates of orientation.
-- **Quaternion-Based Orientation:** Implements quaternion differential equations and RK4 integration for smooth orientation updates.
+- **Fusion AHRS Integration:** Utilizes the Fusion library for robust sensor fusion with accelerometer rejection and automatic gravity removal.
+- **Quaternion-Based Orientation:** Provides smooth orientation updates using the Fusion AHRS algorithm.
 - **Gaussian Filtering:** Uses a causal Gaussian filter to reduce high-frequency noise in sensor data.
-- **Zero-Velocity Correction:** Applies a bias correction when the device is detected to be stationary.
+- **Adaptive Bias Correction:** Continuously updates acceleration bias during stationary periods to compensate for temperature drift.
+- **Zero-Velocity Update:** Applies ZUPT correction when the device is detected to be stationary, preventing velocity drift accumulation.
+- **Trapezoidal Integration:** Uses trapezoidal method for velocity and position updates, improving accuracy over simple Euler integration.
 - **Real-Time Data Output:** Logs key computed values (timestamp, sensor data, estimated acceleration, orientation, velocity, and position) via the Serial interface.
 
 ## Hardware Requirements
@@ -42,6 +46,7 @@ The code reads raw IMU data (acceleration, rotation speed, and temperature) from
    ```bash
    git clone https://github.com/hijimasa/cxd5602pwbimu_localizer_arduino.git
    cd cxd5602pwbimu_localizer_arduino
+   git submodule update --init
    ```
 
 2. **Open in Arduino IDE:**
@@ -61,27 +66,43 @@ The code reads raw IMU data (acceleration, rotation speed, and temperature) from
 
 ### Initialization and Calibration
 
-- **Initialization Function (`imu_data_initialize`):**  
+- **Initialization Function (`imu_data_initialize`):**
   Averages a number of samples (defined by `MESUREMENT_FREQUENCY`) to calibrate the accelerometer and gyroscope readings. It also computes the initial quaternion based on gravity and earth rotation.
+
+- **Acceleration Bias Learning (`initialize_acceleration_bias`):**
+  During the setup phase, the system collects 5 seconds of IMU data (9600 samples) to learn the initial acceleration bias using the Fusion AHRS library. This helps compensate for sensor manufacturing variations and temperature-dependent offsets.
 
 ### Data Processing
 
-- **Gaussian Filtering:**  
-  A causal Gaussian filter smooths both the acceleration and rotation speed data using a precomputed kernel.
-  
-- **Orientation Update:**  
-  The quaternion is updated using the RK4 integration method based on the gyroscope readings. This approach ensures a smooth integration of rotational motion.
+- **Gaussian Filtering:**
+  A causal Gaussian filter smooths both the acceleration and rotation speed data using a precomputed kernel with sigma = LIST_SIZE/8.0.
 
-- **Madgwick Filter:**  
-  The code applies the Madgwick algorithm (with custom weights) to fuse accelerometer and gyroscope data, correcting the orientation by comparing the expected and measured gravity direction.
+- **Fusion AHRS Algorithm:**
+  The Fusion library provides a comprehensive AHRS solution that handles:
+  - Quaternion update with gyroscope integration
+  - Accelerometer correction with intelligent rejection during motion (threshold: 10 degrees)
+  - Automatic gravity vector tracking and removal
+  - Coordinate frame transformations (North-West-Up convention)
+  - Recovery mechanism after sensor saturation (5-second trigger period)
 
-- **Zero-Velocity Correction:**  
-  If the computed velocity falls below a dynamic bias threshold, the algorithm resets the velocity to zero to mitigate drift.
+- **Gyroscope Offset Correction:**
+  The `FusionOffset` algorithm continuously estimates and corrects gyroscope bias during runtime.
+
+- **Adaptive Acceleration Bias Update:**
+  During stationary periods (detected by ZUPT), the acceleration bias is continuously updated using exponential moving average (learning rate: 0.1%) to compensate for temperature drift.
+
+- **Zero-Velocity Update (ZUPT):**
+  The improved ZUPT algorithm detects stationary state based on:
+  - Acceleration magnitude threshold: < 0.15 m/s²
+  - Gyroscope magnitude threshold: < 0.015 rad/s (≈ 0.86°/s)
+  - Duration requirement: 0.1 seconds (192 samples)
+
+  When stationary state is detected, velocity is reset to zero and acceleration bias is updated.
 
 ### Integration for Velocity and Position
 
-- **Velocity & Position Updates:**  
-  After compensating for gravity, the acceleration is integrated over time (using simple Euler integration) to update the velocity and then the position.
+- **Velocity & Position Updates:**
+  After compensating for gravity and bias, the acceleration is integrated over time using the **trapezoidal method** to update the velocity and then the position. This provides better accuracy compared to simple Euler integration.
 
 ## Contributing
 
