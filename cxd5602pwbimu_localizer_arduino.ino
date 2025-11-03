@@ -5,6 +5,12 @@
 #include <arch/board/cxd56_cxd5602pwbimu.h>
 #include <stdbool.h>
 
+// Fusion sensor fusion library
+extern "C"
+{
+#include "src/Fusion/Fusion.h"
+}
+
 #define CXD5602PWBIMU_DEVPATH "/dev/imu0"
 #define MAX_NFIFO (1)
 
@@ -27,17 +33,34 @@
 #define LIST_SIZE 8
 #define SIGMA_K (LIST_SIZE / 8.0f)
 
-// Madgwick Filterの重み
+// Madgwick Filterの重み (Legacy - now using Fusion)
 #define ACC_MADGWICK_FILTER_WEIGHT 0.11f //(sqrt(3.0f / 4.0f) * GYRO_NOISE_AMOUNT / ACCEL_NOISE_AMOUNT)
 #define GYRO_MADGWICK_FILTER_WEIGHT 0.00000001f
+
+// Fusion AHRS settings
+#define FUSION_AHRS_GAIN 0.5f                                   // Recommended gain value
+#define FUSION_GYRO_RANGE 2000.0f                               // Gyroscope range in degrees/s
+#define FUSION_ACCEL_REJECTION 10.0f                            // Acceleration rejection threshold in degrees
+#define FUSION_RECOVERY_TRIGGER_PERIOD 5 * MESUREMENT_FREQUENCY // 5 seconds
 
 static cxd5602pwbimu_data_t g_data[MAX_NFIFO];
 int devfd;
 int ret;
 
+// Fusion AHRS instance
+FusionAhrs fusionAhrs;
+FusionOffset fusionOffset;
+
 // グローバル変数（ゼロ速度補正用）
-float biased_velocity = 0.0;
 int zero_velocity_counter = 0;
+
+// 加速度バイアス補正用
+float acceleration_bias_x = 0.0;
+float acceleration_bias_y = 0.0;
+float acceleration_bias_z = 0.0;
+bool bias_initialized = false;
+int bias_sample_count = 0;
+#define BIAS_LEARNING_SAMPLES (MESUREMENT_FREQUENCY * 5) // 5 seconds of data for more stable bias estimation
 
 bool is_initialized = false;
 int current_list_num = 0;
@@ -143,13 +166,17 @@ void update_vector_rk4(const float v[3], const float omega[3], float h, float v_
     v_next[i] = v[i] + (h / 6.0) * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]);
 }
 
-// ゼロ速度補正関数
-bool zero_velocity_correction(float target_velocity[3], float dt)
+// 改良版ZUPT: 加速度とジャイロの大きさのみで静止判定
+// 速度は積分誤差が蓄積するため判定基準に使用しない
+bool zero_velocity_correction(float accel_magnitude, float gyro_magnitude)
 {
-  biased_velocity += ACCEL_BIAS_DRIFT * dt;
-  if (fabs(target_velocity[0]) < biased_velocity &&
-      fabs(target_velocity[1]) < biased_velocity &&
-      fabs(target_velocity[2]) < biased_velocity)
+  // 静止判定の閾値
+  const float ACCEL_THRESHOLD = 0.15f;                    // m/s² (重力除去後の加速度)
+  const float GYRO_THRESHOLD = 0.015f;                    // rad/s (角速度、約0.86°/s)
+  const int REQUIRED_SAMPLES = MESUREMENT_FREQUENCY / 10; // 0.1秒 = 192サンプル
+
+  // 静止条件: 加速度が小さい AND ジャイロが小さい（速度は見ない！）
+  if (accel_magnitude < ACCEL_THRESHOLD && gyro_magnitude < GYRO_THRESHOLD)
   {
     zero_velocity_counter++;
   }
@@ -157,13 +184,53 @@ bool zero_velocity_correction(float target_velocity[3], float dt)
   {
     zero_velocity_counter = 0;
   }
-  if (zero_velocity_counter > MESUREMENT_FREQUENCY)
+
+  // 0.1秒間静止が続いたらZUPT適用
+  if (zero_velocity_counter > REQUIRED_SAMPLES)
   {
-    biased_velocity = 0.0;
-    zero_velocity_counter = 0;
     return true;
   }
   return false;
+}
+
+// 加速度バイアス初期学習関数（setup()で使用）
+void initialize_acceleration_bias(cxd5602pwbimu_data_t dat)
+{
+  // Fusionで処理した加速度を取得
+  float ax = dat.ax / GRAVITY_AMOUNT;
+  float ay = dat.ay / GRAVITY_AMOUNT;
+  float az = dat.az / GRAVITY_AMOUNT;
+
+  FusionVector gyroscope = {
+      dat.gx * 180.0f / M_PI,
+      dat.gy * 180.0f / M_PI,
+      dat.gz * 180.0f / M_PI};
+  gyroscope = FusionOffsetUpdate(&fusionOffset, gyroscope);
+
+  FusionVector accelerometer = {ax, ay, az};
+
+  // 仮のdt（正確な値は不要）
+  float dt = 1.0f / MESUREMENT_FREQUENCY;
+  FusionAhrsUpdateNoMagnetometer(&fusionAhrs, gyroscope, accelerometer, dt);
+
+  // 地球座標系の加速度を取得（重力除去済み）
+  FusionVector earthAcceleration = FusionAhrsGetEarthAcceleration(&fusionAhrs);
+
+  // バイアスを累積
+  acceleration_bias_x += earthAcceleration.axis.x * GRAVITY_AMOUNT;
+  acceleration_bias_y += earthAcceleration.axis.y * GRAVITY_AMOUNT;
+  acceleration_bias_z += earthAcceleration.axis.z * GRAVITY_AMOUNT;
+  bias_sample_count++;
+}
+
+// 加速度バイアス連続更新関数（静止時に呼び出し）
+void update_acceleration_bias(float accel_x, float accel_y, float accel_z)
+{
+  // 指数移動平均でゆっくり更新
+  const float alpha = 0.001; // 学習率（0.1%ずつ更新）
+  acceleration_bias_x = (1.0 - alpha) * acceleration_bias_x + alpha * accel_x;
+  acceleration_bias_y = (1.0 - alpha) * acceleration_bias_y + alpha * accel_y;
+  acceleration_bias_z = (1.0 - alpha) * acceleration_bias_z + alpha * accel_z;
 }
 
 // 現在の時刻におけるフィルタ結果を計算（x: 入力配列、n: データ数、kernel: ガウスカーネル、K: カーネルサイズ）
@@ -367,7 +434,7 @@ void update(cxd5602pwbimu_data_t dat)
   mesuared_rotation_speed_y[current_list_num] = dat.gy;
   mesuared_rotation_speed_z[current_list_num] = dat.gz;
 
-  // ガウスフィルタを適用
+  // ガウスフィルタを適用（ノイズ低減）
   estimated_acceleration_x = apply_causal_gaussian_filter(mesuared_acceleration_x, current_list_num);
   estimated_acceleration_y = apply_causal_gaussian_filter(mesuared_acceleration_y, current_list_num);
   estimated_acceleration_z = apply_causal_gaussian_filter(mesuared_acceleration_z, current_list_num);
@@ -375,130 +442,69 @@ void update(cxd5602pwbimu_data_t dat)
   estimated_rotation_speed_y = apply_causal_gaussian_filter(mesuared_rotation_speed_y, current_list_num);
   estimated_rotation_speed_z = apply_causal_gaussian_filter(mesuared_rotation_speed_z, current_list_num);
 
-  // 内積を引く
-  float acceleration_norm = sqrt(estimated_acceleration_x * estimated_acceleration_x +
-                                 estimated_acceleration_y * estimated_acceleration_y +
-                                 estimated_acceleration_z * estimated_acceleration_z);
-  float dot_product = estimated_acceleration_x * estimated_rotation_speed_x +
-                      estimated_acceleration_y * estimated_rotation_speed_y +
-                      estimated_acceleration_z * estimated_rotation_speed_z;
-  float earth_rotation_speed_x = estimated_rotation_speed_x - dot_product * estimated_acceleration_x / acceleration_norm / acceleration_norm;
-  float earth_rotation_speed_y = estimated_rotation_speed_y - dot_product * estimated_acceleration_y / acceleration_norm / acceleration_norm;
-  float earth_rotation_speed_z = estimated_rotation_speed_z - dot_product * estimated_acceleration_z / acceleration_norm / acceleration_norm;
-  float earth_rotation_speed_norm = sqrt(earth_rotation_speed_x * earth_rotation_speed_x +
-                                         earth_rotation_speed_y * earth_rotation_speed_y +
-                                         earth_rotation_speed_z * earth_rotation_speed_z);
+  // Apply gyroscope offset correction (runtime bias estimation)
+  FusionVector gyroscope = {
+      estimated_rotation_speed_x * 180.0f / M_PI, // Convert rad/s to deg/s
+      estimated_rotation_speed_y * 180.0f / M_PI,
+      estimated_rotation_speed_z * 180.0f / M_PI};
+  gyroscope = FusionOffsetUpdate(&fusionOffset, gyroscope);
 
-  // キャリブレーション条件のチェック
-  if (acceleration_norm < GRAVITY_AMOUNT + ACCEL_NOISE_AMOUNT * 40 &&
-      acceleration_norm > GRAVITY_AMOUNT - ACCEL_NOISE_AMOUNT * 40 &&
-      earth_rotation_speed_norm < EARTH_ROTATION_SPEED_AMOUNT + GYRO_NOISE_AMOUNT * 2.0 &&
-      earth_rotation_speed_norm > EARTH_ROTATION_SPEED_AMOUNT / 2.0)
+  // Prepare accelerometer data (convert to g units)
+  FusionVector accelerometer = {
+      estimated_acceleration_x / GRAVITY_AMOUNT,
+      estimated_acceleration_y / GRAVITY_AMOUNT,
+      estimated_acceleration_z / GRAVITY_AMOUNT};
+
+  // Update Fusion AHRS (without magnetometer)
+  FusionAhrsUpdateNoMagnetometer(&fusionAhrs, gyroscope, accelerometer, dt);
+
+  // Get quaternion from Fusion AHRS
+  FusionQuaternion fusionQuaternion = FusionAhrsGetQuaternion(&fusionAhrs);
+  quaternion[0] = fusionQuaternion.element.w;
+  quaternion[1] = fusionQuaternion.element.x;
+  quaternion[2] = fusionQuaternion.element.y;
+  quaternion[3] = fusionQuaternion.element.z;
+
+  // Get linear acceleration from Fusion AHRS (gravity already removed)
+  FusionVector linearAcceleration = FusionAhrsGetLinearAcceleration(&fusionAhrs);
+
+  // Get earth acceleration (gravity already removed, in g units)
+  FusionVector earthAcceleration = FusionAhrsGetEarthAcceleration(&fusionAhrs);
+
+  // Convert from g to m/s²
+  estimated_acceleration_x = earthAcceleration.axis.x * GRAVITY_AMOUNT;
+  estimated_acceleration_y = earthAcceleration.axis.y * GRAVITY_AMOUNT;
+  estimated_acceleration_z = earthAcceleration.axis.z * GRAVITY_AMOUNT;
+
+  // Note: Fusion AHRS automatically handles:
+  // - Quaternion update with gyroscope integration
+  // - Accelerometer correction with intelligent rejection during motion
+  // - Gravity vector tracking and removal
+  // - Coordinate frame transformations
+  // This replaces the old Madgwick filter + RK4 integration
+
+  // バイアス補正前の生の値を保存（バイアス更新用）
+  float raw_acceleration_x = estimated_acceleration_x;
+  float raw_acceleration_y = estimated_acceleration_y;
+  float raw_acceleration_z = estimated_acceleration_z;
+
+  // バイアス補正を適用（初期化済みの場合）
+  if (bias_initialized)
   {
-    if (calibrate_counter < MESUREMENT_FREQUENCY / 30)
-    {
-      calibrate_counter++;
-    }
-    else
-    {
-      float normalized_acceleration_x = estimated_acceleration_x / acceleration_norm;
-      float normalized_acceleration_y = estimated_acceleration_y / acceleration_norm;
-      float normalized_acceleration_z = estimated_acceleration_z / acceleration_norm;
-      float normalized_earth_rotation_speed_x = earth_rotation_speed_x / earth_rotation_speed_norm;
-      float normalized_earth_rotation_speed_y = earth_rotation_speed_y / earth_rotation_speed_norm;
-      float normalized_earth_rotation_speed_z = earth_rotation_speed_z / earth_rotation_speed_norm;
-
-      // f(q, acc)
-      float f_q_acc[3] = {
-          2 * (quaternion[1] * quaternion[3] - quaternion[0] * quaternion[2]) - normalized_acceleration_x,
-          2 * (quaternion[0] * quaternion[1] + quaternion[2] * quaternion[3]) - normalized_acceleration_y,
-          2 * (0.5 - quaternion[1] * quaternion[1] - quaternion[2] * quaternion[2]) - normalized_acceleration_z};
-
-      // J(q, acc)
-      float j_q_acc[3][4] = {
-          {2 * quaternion[2], -2 * quaternion[3], 2 * quaternion[0], -2 * quaternion[1]},
-          {2 * quaternion[1], 2 * quaternion[0], 2 * quaternion[3], 2 * quaternion[2]},
-          {0, -4 * quaternion[1], -4 * quaternion[2], 0}};
-      float step_acc[4];
-      for (int i = 0; i < 4; i++)
-      {
-        step_acc[i] = 0.0;
-        for (int j = 0; j < 3; j++)
-        {
-          step_acc[i] += j_q_acc[j][i] * f_q_acc[j];
-        }
-      }
-      float step_acc_norm = sqrt(step_acc[0] * step_acc[0] +
-                                 step_acc[1] * step_acc[1] +
-                                 step_acc[2] * step_acc[2] +
-                                 step_acc[3] * step_acc[3]);
-
-      float f_q_gyro[3] = {
-          2 * (quaternion[1] * quaternion[2] + quaternion[0] * quaternion[3]) - normalized_earth_rotation_speed_x,
-          2 * (0.5 - quaternion[0] * quaternion[0] - quaternion[2] * quaternion[2]) - normalized_earth_rotation_speed_y,
-          2 * (quaternion[2] * quaternion[3] - quaternion[0] * quaternion[1]) - normalized_earth_rotation_speed_z};
-      // J(q, gyro)
-      float j_q_gyro[3][4] = {
-          {2 * quaternion[3], 2 * quaternion[2], 2 * quaternion[1], 2 * quaternion[0]},
-          {2 * quaternion[0], -2 * quaternion[1], 2 * quaternion[2], -2 * quaternion[3]},
-          {-2 * quaternion[1], -2 * quaternion[0], -2 * quaternion[3], -2 * quaternion[2]}};
-      float step_gyro[4];
-      for (int i = 0; i < 4; i++)
-      {
-        step_gyro[i] = 0.0;
-        for (int j = 0; j < 3; j++)
-        {
-          step_gyro[i] += j_q_gyro[j][i] * f_q_gyro[j];
-        }
-      }
-      float step_gyro_norm = sqrt(step_gyro[0] * step_gyro[0] +
-                                  step_gyro[1] * step_gyro[1] +
-                                  step_gyro[2] * step_gyro[2] +
-                                  step_gyro[3] * step_gyro[3]);
-      for (int i = 0; i < 4; i++)
-      {
-        quaternion[i] -= step_acc[i] * ACC_MADGWICK_FILTER_WEIGHT / step_acc_norm * dt;
-        quaternion[i] -= step_gyro[i] * GYRO_MADGWICK_FILTER_WEIGHT / step_gyro_norm * dt;
-      }
-
-      // 正規化
-      float quaternion_norm = sqrt(quaternion[0] * quaternion[0] +
-                                   quaternion[1] * quaternion[1] +
-                                   quaternion[2] * quaternion[2] +
-                                   quaternion[3] * quaternion[3]);
-      for (int i = 0; i < 4; i++)
-      {
-        quaternion[i] /= quaternion_norm;
-      }
-
-      current_gravity[0] = estimated_acceleration_x;
-      current_gravity[1] = estimated_acceleration_y;
-      current_gravity[2] = estimated_acceleration_z;
-
-      velocity[0] = 0.0;
-      velocity[1] = 0.0;
-      velocity[2] = 0.0;
-      calibrate_counter = 0;
-    }
-  }
-  else
-  {
-    calibrate_counter = 0;
+    estimated_acceleration_x -= acceleration_bias_x;
+    estimated_acceleration_y -= acceleration_bias_y;
+    estimated_acceleration_z -= acceleration_bias_z;
   }
 
-  // クォータニオン更新（更新結果は返り値として受け取る）
-  float estimated_rotation_speed[3] = {estimated_rotation_speed_x, estimated_rotation_speed_y, estimated_rotation_speed_z};
-  float estimated_rotation_speed_minus[3] = {-estimated_rotation_speed_x, -estimated_rotation_speed_y, -estimated_rotation_speed_z};
-  runge_kutta_update(quaternion, estimated_rotation_speed, dt, quaternion);
-  update_vector_rk4(current_gravity, estimated_rotation_speed_minus, dt, current_gravity);
+  // 加速度とジャイロの大きさを計算（ZUPT判定用）
+  float accel_magnitude = sqrt(estimated_acceleration_x * estimated_acceleration_x +
+                               estimated_acceleration_y * estimated_acceleration_y +
+                               estimated_acceleration_z * estimated_acceleration_z);
+  float gyro_magnitude = sqrt(estimated_rotation_speed_x * estimated_rotation_speed_x +
+                              estimated_rotation_speed_y * estimated_rotation_speed_y +
+                              estimated_rotation_speed_z * estimated_rotation_speed_z);
 
-  float acceleration[3] = {estimated_acceleration_x - current_gravity[0], estimated_acceleration_y - current_gravity[1], estimated_acceleration_z - current_gravity[2]};
-  apply_rotation(quaternion, acceleration, acceleration);
-  estimated_acceleration_x = acceleration[0];
-  estimated_acceleration_y = acceleration[1];
-  estimated_acceleration_z = acceleration[2];
-
-  // 速度・位置の更新（単純オイラー積分）
+  // 速度・位置の更新（台形積分）
   velocity[0] += (estimated_acceleration_x + old_acceleration[0]) / 2.0f * dt;
   velocity[1] += (estimated_acceleration_y + old_acceleration[1]) / 2.0f * dt;
   velocity[2] += (estimated_acceleration_z + old_acceleration[2]) / 2.0f * dt;
@@ -506,11 +512,22 @@ void update(cxd5602pwbimu_data_t dat)
   position[1] += (velocity[1] + old_velocity[1]) / 2.0f * dt;
   position[2] += (velocity[2] + old_velocity[2]) / 2.0f * dt;
 
-  if (zero_velocity_correction(velocity, dt))
+  // 改良版ZUPT判定と適用（速度は見ない、センサーの生データのみ）
+  bool is_stationary = zero_velocity_correction(accel_magnitude, gyro_magnitude);
+
+  if (is_stationary)
   {
+    // 速度をゼロにリセット
     velocity[0] = 0.0;
     velocity[1] = 0.0;
     velocity[2] = 0.0;
+
+    // 静止時はバイアスを連続更新（温度ドリフト等に追従）
+    // 重要: バイアス補正前の生の値を使う！
+    if (bias_initialized)
+    {
+      update_acceleration_bias(raw_acceleration_x, raw_acceleration_y, raw_acceleration_z);
+    }
   }
 
   old_acceleration[0] = estimated_acceleration_x;
@@ -567,6 +584,22 @@ void setup()
 
   start_sensing(devfd, MESUREMENT_FREQUENCY, 8, 2000, MAX_NFIFO);
   drop_50msdata(devfd, MESUREMENT_FREQUENCY);
+
+  // Initialize Fusion AHRS
+  FusionOffsetInitialise(&fusionOffset, MESUREMENT_FREQUENCY);
+  FusionAhrsInitialise(&fusionAhrs);
+
+  // Configure Fusion AHRS settings
+  const FusionAhrsSettings settings = {
+      .convention = FusionConventionNwu, // North-West-Up convention
+      .gain = FUSION_AHRS_GAIN,
+      .gyroscopeRange = FUSION_GYRO_RANGE,
+      .accelerationRejection = FUSION_ACCEL_REJECTION,
+      .magneticRejection = 0.0f, // No magnetometer
+      .recoveryTriggerPeriod = FUSION_RECOVERY_TRIGGER_PERIOD,
+  };
+  FusionAhrsSetSettings(&fusionAhrs, &settings);
+
   // dump_data(devfd);
   bool is_initialized = false;
   while (!is_initialized)
@@ -580,6 +613,25 @@ void setup()
       }
     }
   }
+
+  // 加速度バイアスの初期学習（5秒間、9600サンプル）
+  while (bias_sample_count < BIAS_LEARNING_SAMPLES)
+  {
+    ret = read(devfd, g_data, sizeof(g_data[0]) * MAX_NFIFO);
+    if (ret == sizeof(g_data[0]) * MAX_NFIFO)
+    {
+      for (int i = 0; i < MAX_NFIFO; i++)
+      {
+        initialize_acceleration_bias(g_data[i]);
+      }
+    }
+  }
+
+  // 平均を取る
+  acceleration_bias_x /= bias_sample_count;
+  acceleration_bias_y /= bias_sample_count;
+  acceleration_bias_z /= bias_sample_count;
+  bias_initialized = true;
 }
 
 void loop()
