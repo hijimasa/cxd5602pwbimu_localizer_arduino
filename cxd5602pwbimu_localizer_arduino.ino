@@ -17,7 +17,7 @@ extern "C"
 #define GRAVITY_AMOUNT 9.80665f
 #define EARTH_ROTATION_SPEED_AMOUNT 7.2921159e-5
 
-#define MESUREMENT_FREQUENCY 1920
+#define MESUREMENT_FREQUENCY 240 // 1920
 #define GYRO_NOISE_DENSITY (1.0e-3 * M_PI / 180.0f)
 #define ACCEL_NOISE_DENSITY (14.0e-6 * GRAVITY_AMOUNT)
 #define GYRO_NOISE_AMOUNT (GYRO_NOISE_DENSITY * sqrt(MESUREMENT_FREQUENCY))
@@ -84,94 +84,13 @@ float position[3] = {0.0, 0.0, 0.0};
 int old_timestamp = -1;
 int calibrate_counter = 0;
 
-// クォータニオン微分関数：qは長さ4、omegaは長さ3、dqdtに結果を出力
-void diff_quaternion(const float q[4], const float omega[3], float dqdt[4])
-{
-  float w = q[0], x = q[1], y = q[2], z = q[3];
-  float omega_x = omega[0], omega_y = omega[1], omega_z = omega[2];
-
-  dqdt[0] = 0.5 * (-x * omega_x - y * omega_y - z * omega_z);
-  dqdt[1] = 0.5 * (w * omega_x + y * omega_z - z * omega_y);
-  dqdt[2] = 0.5 * (w * omega_y - x * omega_z + z * omega_x);
-  dqdt[3] = 0.5 * (w * omega_z + x * omega_y - y * omega_x);
-}
-
-// RK4法によるクォータニオン更新
-void runge_kutta_update(const float q[4], const float omega[3], float h, float q_next[4])
-{
-  float k1[4], k2[4], k3[4], k4[4];
-  float q1[4], q2[4], q3[4];
-  int i;
-
-  diff_quaternion(q, omega, k1);
-  for (i = 0; i < 4; i++)
-  {
-    q1[i] = q[i] + (h / 2.0) * k1[i];
-  }
-  diff_quaternion(q1, omega, k2);
-  for (i = 0; i < 4; i++)
-  {
-    q2[i] = q[i] + (h / 2.0) * k2[i];
-  }
-  diff_quaternion(q2, omega, k3);
-  for (i = 0; i < 4; i++)
-  {
-    q3[i] = q[i] + h * k3[i];
-  }
-  diff_quaternion(q3, omega, k4);
-  for (i = 0; i < 4; i++)
-  {
-    q_next[i] = q[i] + (h / 6.0) * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]);
-  }
-  // 正規化
-  float norm = 0.0;
-  for (i = 0; i < 4; i++)
-  {
-    norm += q_next[i] * q_next[i];
-  }
-  norm = sqrt(norm);
-  for (i = 0; i < 4; i++)
-  {
-    q_next[i] /= norm;
-  }
-}
-
-// 3次元ベクトルの外積
-void cross_product(const float a[3], const float b[3], float result[3])
-{
-  result[0] = a[1] * b[2] - a[2] * b[1];
-  result[1] = a[2] * b[0] - a[0] * b[2];
-  result[2] = a[0] * b[1] - a[1] * b[0];
-}
-
-// RK4法による3次元ベクトルの更新
-void update_vector_rk4(const float v[3], const float omega[3], float h, float v_next[3])
-{
-  float k1[3], k2[3], k3[3], k4[3];
-  float temp[3];
-  int i;
-
-  cross_product(omega, v, k1);
-  for (i = 0; i < 3; i++)
-    temp[i] = v[i] + (h / 2.0) * k1[i];
-  cross_product(omega, temp, k2);
-  for (i = 0; i < 3; i++)
-    temp[i] = v[i] + (h / 2.0) * k2[i];
-  cross_product(omega, temp, k3);
-  for (i = 0; i < 3; i++)
-    temp[i] = v[i] + h * k3[i];
-  cross_product(omega, temp, k4);
-  for (i = 0; i < 3; i++)
-    v_next[i] = v[i] + (h / 6.0) * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]);
-}
-
 // 改良版ZUPT: 加速度とジャイロの大きさのみで静止判定
 // 速度は積分誤差が蓄積するため判定基準に使用しない
 bool zero_velocity_correction(float accel_magnitude, float gyro_magnitude)
 {
   // 静止判定の閾値
-  const float ACCEL_THRESHOLD = 0.15f;                    // m/s² (重力除去後の加速度)
-  const float GYRO_THRESHOLD = 0.015f;                    // rad/s (角速度、約0.86°/s)
+  const float ACCEL_THRESHOLD = 0.05f;                    // m/s² (重力除去後の加速度)
+  const float GYRO_THRESHOLD = 0.005f;                    // rad/s (角速度、約0.86°/s)
   const int REQUIRED_SAMPLES = MESUREMENT_FREQUENCY / 10; // 0.1秒 = 192サンプル
 
   // 静止条件: 加速度が小さい AND ジャイロが小さい（速度は見ない！）
@@ -263,35 +182,6 @@ float apply_causal_gaussian_filter(const float *x, int list_num)
     y_current += kernel[i] * x[list_idx];
   }
   return y_current;
-}
-
-// 回転行列を使って3次元ベクトルに回転を適用する関数
-void apply_rotation(const float *q, const float *v, float result[3])
-{
-  // クォータニオンの逆を計算
-  float q_conjugate[4] = {q[0], -q[1], -q[2], -q[3]};
-
-  // 入力ベクトルをクォータニオン形式に変換
-  float v_quat[4] = {0.0f, v[0], v[1], v[2]};
-
-  // q * v_quat を計算
-  float temp[4];
-  temp[0] = q[0] * v_quat[0] - q[1] * v_quat[1] - q[2] * v_quat[2] - q[3] * v_quat[3];
-  temp[1] = q[0] * v_quat[1] + q[1] * v_quat[0] + q[2] * v_quat[3] - q[3] * v_quat[2];
-  temp[2] = q[0] * v_quat[2] - q[1] * v_quat[3] + q[2] * v_quat[0] + q[3] * v_quat[1];
-  temp[3] = q[0] * v_quat[3] + q[1] * v_quat[2] - q[2] * v_quat[1] + q[3] * v_quat[0];
-
-  // temp * q_conjugate を計算
-  float rotated[4];
-  rotated[0] = temp[0] * q_conjugate[0] - temp[1] * q_conjugate[1] - temp[2] * q_conjugate[2] - temp[3] * q_conjugate[3];
-  rotated[1] = temp[0] * q_conjugate[1] + temp[1] * q_conjugate[0] + temp[2] * q_conjugate[3] - temp[3] * q_conjugate[2];
-  rotated[2] = temp[0] * q_conjugate[2] - temp[1] * q_conjugate[3] + temp[2] * q_conjugate[0] + temp[3] * q_conjugate[1];
-  rotated[3] = temp[0] * q_conjugate[3] + temp[1] * q_conjugate[2] - temp[2] * q_conjugate[1] + temp[3] * q_conjugate[0];
-
-  // 結果をベクトル形式に変換
-  result[0] = rotated[1];
-  result[1] = rotated[2];
-  result[2] = rotated[3];
 }
 
 bool imu_data_initialize(cxd5602pwbimu_data_t dat)
@@ -460,9 +350,6 @@ void update(cxd5602pwbimu_data_t dat)
   quaternion[2] = fusionQuaternion.element.y;
   quaternion[3] = fusionQuaternion.element.z;
 
-  // Get linear acceleration from Fusion AHRS (gravity already removed)
-  FusionVector linearAcceleration = FusionAhrsGetLinearAcceleration(&fusionAhrs);
-
   // Get earth acceleration (gravity already removed, in g units)
   FusionVector earthAcceleration = FusionAhrsGetEarthAcceleration(&fusionAhrs);
 
@@ -498,6 +385,29 @@ void update(cxd5602pwbimu_data_t dat)
   float gyro_magnitude = sqrt(estimated_rotation_speed_x * estimated_rotation_speed_x +
                               estimated_rotation_speed_y * estimated_rotation_speed_y +
                               estimated_rotation_speed_z * estimated_rotation_speed_z);
+
+  // 速度の指数減衰モデル（動きが小さいほど速度を減衰）
+  // センサの動きの大きさを統合指標として計算
+  float motion_magnitude = accel_magnitude + gyro_magnitude * 5.0f; // ジャイロにスケール係数を適用
+
+  // 減衰係数の計算（motion_magnitudeが小さいほど強く減衰）
+  // motion_magnitude < 0.1 の範囲で、0.90 ～ 0.999 まで変化
+  const float MOTION_THRESHOLD = 0.1f; // この値以下で減衰を適用
+  const float MIN_DECAY = 0.90f;       // 最大減衰時（静止時）
+  const float MAX_DECAY = 0.999f;      // 最小減衰時（動作時）
+
+  float decay_factor = 1.0f;
+  if (motion_magnitude < MOTION_THRESHOLD)
+  {
+    // 0.0 → MIN_DECAY (0.90), MOTION_THRESHOLD → MAX_DECAY (0.999)
+    float normalized_motion = motion_magnitude / MOTION_THRESHOLD;
+    decay_factor = MIN_DECAY + (MAX_DECAY - MIN_DECAY) * normalized_motion;
+
+    // 速度に減衰を適用
+    velocity[0] *= decay_factor;
+    velocity[1] *= decay_factor;
+    velocity[2] *= decay_factor;
+  }
 
   // 速度・位置の更新（台形積分）
   velocity[0] += (estimated_acceleration_x + old_acceleration[0]) / 2.0f * dt;
@@ -608,6 +518,17 @@ void setup()
       }
     }
   }
+
+  // 計算された初期姿勢をFusion AHRSに設定
+  FusionQuaternion initialQuaternion;
+  initialQuaternion.element.w = quaternion[0];
+  initialQuaternion.element.x = quaternion[1];
+  initialQuaternion.element.y = quaternion[2];
+  initialQuaternion.element.z = quaternion[3];
+  FusionAhrsSetQuaternion(&fusionAhrs, initialQuaternion);
+
+  fusionAhrs.initialising = false;
+  fusionAhrs.rampedGain = FUSION_AHRS_GAIN;
 
   // 加速度バイアスの初期学習（10秒間、19200サンプル）
   while (bias_sample_count < BIAS_LEARNING_SAMPLES)
