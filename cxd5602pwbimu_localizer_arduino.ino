@@ -60,7 +60,7 @@ float acceleration_bias_y = 0.0;
 float acceleration_bias_z = 0.0;
 bool bias_initialized = false;
 int bias_sample_count = 0;
-#define BIAS_LEARNING_SAMPLES (MESUREMENT_FREQUENCY * 5) // 5 seconds of data for more stable bias estimation
+#define BIAS_LEARNING_SAMPLES (MESUREMENT_FREQUENCY * 10) // 10 seconds of data for more stable bias estimation
 
 bool is_initialized = false;
 int current_list_num = 0;
@@ -81,7 +81,6 @@ float old_acceleration[3] = {0.0, 0.0, 0.0};
 float velocity[3] = {0.0, 0.0, 0.0};
 float old_velocity[3] = {0.0, 0.0, 0.0};
 float position[3] = {0.0, 0.0, 0.0};
-float current_gravity[3] = {0.0, 0.0, 0.0};
 int old_timestamp = -1;
 int calibrate_counter = 0;
 
@@ -304,7 +303,7 @@ bool imu_data_initialize(cxd5602pwbimu_data_t dat)
   static float initialize_rotation_speed_x_sum = 0.0;
   static float initialize_rotation_speed_y_sum = 0.0;
   static float initialize_rotation_speed_z_sum = 0.0;
-  if (initialize_counter < MESUREMENT_FREQUENCY)
+  if (initialize_counter < MESUREMENT_FREQUENCY * 5) // 5秒間データを蓄積
   {
     initialize_acceleration_x_sum += dat.ax;
     initialize_acceleration_y_sum += dat.ay;
@@ -318,15 +317,15 @@ bool imu_data_initialize(cxd5602pwbimu_data_t dat)
   }
   else
   {
-    estimated_acceleration_x = initialize_acceleration_x_sum / MESUREMENT_FREQUENCY;
-    estimated_acceleration_y = initialize_acceleration_y_sum / MESUREMENT_FREQUENCY;
-    estimated_acceleration_z = initialize_acceleration_z_sum / MESUREMENT_FREQUENCY;
+    estimated_acceleration_x = initialize_acceleration_x_sum / (MESUREMENT_FREQUENCY * 5);
+    estimated_acceleration_y = initialize_acceleration_y_sum / (MESUREMENT_FREQUENCY * 5);
+    estimated_acceleration_z = initialize_acceleration_z_sum / (MESUREMENT_FREQUENCY * 5);
     float average_acceleration_norm = sqrt(estimated_acceleration_x * estimated_acceleration_x +
                                            estimated_acceleration_y * estimated_acceleration_y +
                                            estimated_acceleration_z * estimated_acceleration_z);
-    estimated_rotation_speed_x = initialize_rotation_speed_x_sum / MESUREMENT_FREQUENCY;
-    estimated_rotation_speed_y = initialize_rotation_speed_y_sum / MESUREMENT_FREQUENCY;
-    estimated_rotation_speed_z = initialize_rotation_speed_z_sum / MESUREMENT_FREQUENCY;
+    estimated_rotation_speed_x = initialize_rotation_speed_x_sum / (MESUREMENT_FREQUENCY * 5);
+    estimated_rotation_speed_y = initialize_rotation_speed_y_sum / (MESUREMENT_FREQUENCY * 5);
+    estimated_rotation_speed_z = initialize_rotation_speed_z_sum / (MESUREMENT_FREQUENCY * 5);
     float dot_product = estimated_acceleration_x * estimated_rotation_speed_x +
                         estimated_acceleration_y * estimated_rotation_speed_y +
                         estimated_acceleration_z * estimated_rotation_speed_z;
@@ -353,10 +352,6 @@ bool imu_data_initialize(cxd5602pwbimu_data_t dat)
       mesuared_rotation_speed_y[i] = estimated_rotation_speed_y;
       mesuared_rotation_speed_z[i] = estimated_rotation_speed_z;
     }
-
-    current_gravity[0] = estimated_acceleration_x;
-    current_gravity[1] = estimated_acceleration_y;
-    current_gravity[2] = estimated_acceleration_z;
 
     // 単位ベクトル計算
     float z_axis_x = estimated_acceleration_x / average_acceleration_norm;
@@ -614,7 +609,7 @@ void setup()
     }
   }
 
-  // 加速度バイアスの初期学習（5秒間、9600サンプル）
+  // 加速度バイアスの初期学習（10秒間、19200サンプル）
   while (bias_sample_count < BIAS_LEARNING_SAMPLES)
   {
     ret = read(devfd, g_data, sizeof(g_data[0]) * MAX_NFIFO);
