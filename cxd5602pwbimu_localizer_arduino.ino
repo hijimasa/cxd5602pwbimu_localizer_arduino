@@ -30,18 +30,14 @@ extern "C"
 // プロセスノイズの分散
 #define PROCESS_NOISE_VARIANCE (1.0e-7)
 
-#define LIST_SIZE 8
-#define SIGMA_K (LIST_SIZE / 8.0f)
-
-// Madgwick Filterの重み (Legacy - now using Fusion)
-#define ACC_MADGWICK_FILTER_WEIGHT 0.11f //(sqrt(3.0f / 4.0f) * GYRO_NOISE_AMOUNT / ACCEL_NOISE_AMOUNT)
-#define GYRO_MADGWICK_FILTER_WEIGHT 0.00000001f
+#define LIST_SIZE 4
+#define SIGMA_K 1.0f // ガウスカーネルの標準偏差
 
 // Fusion AHRS settings
-#define FUSION_AHRS_GAIN 0.5f                                   // Recommended gain value
-#define FUSION_GYRO_RANGE 2000.0f                               // Gyroscope range in degrees/s
-#define FUSION_ACCEL_REJECTION 10.0f                            // Acceleration rejection threshold in degrees
-#define FUSION_RECOVERY_TRIGGER_PERIOD 5 * MESUREMENT_FREQUENCY // 5 seconds
+#define FUSION_AHRS_GAIN 0.5f                                     // Recommended gain value
+#define FUSION_GYRO_RANGE 2000.0f                                 // Gyroscope range in degrees/s
+#define FUSION_ACCEL_REJECTION 10.0f                              // Acceleration rejection threshold in degrees
+#define FUSION_RECOVERY_TRIGGER_PERIOD (5 * MESUREMENT_FREQUENCY) // 5 seconds
 
 static cxd5602pwbimu_data_t g_data[MAX_NFIFO];
 int devfd;
@@ -131,24 +127,24 @@ void initialize_acceleration_bias(cxd5602pwbimu_data_t dat)
   float dt = 1.0f / MESUREMENT_FREQUENCY;
   FusionAhrsUpdateNoMagnetometer(&fusionAhrs, gyroscope, accelerometer, dt);
 
-  // 地球座標系の加速度を取得（重力除去済み）
-  FusionVector earthAcceleration = FusionAhrsGetEarthAcceleration(&fusionAhrs);
+  // センサ座標系の加速度を取得（重力除去済み）
+  FusionVector linearAcceleration = FusionAhrsGetLinearAcceleration(&fusionAhrs);
 
   // バイアスを累積
-  acceleration_bias_x += earthAcceleration.axis.x * GRAVITY_AMOUNT;
-  acceleration_bias_y += earthAcceleration.axis.y * GRAVITY_AMOUNT;
-  acceleration_bias_z += earthAcceleration.axis.z * GRAVITY_AMOUNT;
+  acceleration_bias_x += linearAcceleration.axis.x * GRAVITY_AMOUNT;
+  acceleration_bias_y += linearAcceleration.axis.y * GRAVITY_AMOUNT;
+  acceleration_bias_z += linearAcceleration.axis.z * GRAVITY_AMOUNT;
   bias_sample_count++;
 }
 
 // 加速度バイアス連続更新関数（静止時に呼び出し）
-void update_acceleration_bias(float accel_x, float accel_y, float accel_z)
+// 静止時の加速度を残差として取得し、バイアスに加算
+void update_acceleration_bias(float stationary_accel_x, float stationary_accel_y, float stationary_accel_z)
 {
-  // 指数移動平均でゆっくり更新
-  const float alpha = 0.001; // 学習率（0.1%ずつ更新）
-  acceleration_bias_x = (1.0 - alpha) * acceleration_bias_x + alpha * accel_x;
-  acceleration_bias_y = (1.0 - alpha) * acceleration_bias_y + alpha * accel_y;
-  acceleration_bias_z = (1.0 - alpha) * acceleration_bias_z + alpha * accel_z;
+  const float alpha = 0.01; // 学習率（1%ずつ更新）
+  acceleration_bias_x += alpha * stationary_accel_x;
+  acceleration_bias_y += alpha * stationary_accel_y;
+  acceleration_bias_z += alpha * stationary_accel_z;
 }
 
 // 現在の時刻におけるフィルタ結果を計算（x: 入力配列、n: データ数、kernel: ガウスカーネル、K: カーネルサイズ）
@@ -327,6 +323,14 @@ void update(cxd5602pwbimu_data_t dat)
   estimated_rotation_speed_y = apply_causal_gaussian_filter(mesuared_rotation_speed_y, current_list_num);
   estimated_rotation_speed_z = apply_causal_gaussian_filter(mesuared_rotation_speed_z, current_list_num);
 
+    // バイアス補正を適用（初期化済みの場合）
+  if (bias_initialized)
+  {
+    estimated_acceleration_x -= acceleration_bias_x;
+    estimated_acceleration_y -= acceleration_bias_y;
+    estimated_acceleration_z -= acceleration_bias_z;
+  }
+
   // Apply gyroscope offset correction (runtime bias estimation)
   FusionVector gyroscope = {
       estimated_rotation_speed_x * 180.0f / M_PI, // Convert rad/s to deg/s
@@ -350,6 +354,12 @@ void update(cxd5602pwbimu_data_t dat)
   quaternion[2] = fusionQuaternion.element.y;
   quaternion[3] = fusionQuaternion.element.z;
 
+  // Get linear acceleration (gravity removed, in sensor frame)
+  FusionVector linearAcceleration = FusionAhrsGetLinearAcceleration(&fusionAhrs);
+  float sensor_based_acceleration_x = linearAcceleration.axis.x * GRAVITY_AMOUNT;
+  float sensor_based_acceleration_y = linearAcceleration.axis.y * GRAVITY_AMOUNT;
+  float sensor_based_acceleration_z = linearAcceleration.axis.z * GRAVITY_AMOUNT;
+
   // Get earth acceleration (gravity already removed, in g units)
   FusionVector earthAcceleration = FusionAhrsGetEarthAcceleration(&fusionAhrs);
 
@@ -365,18 +375,6 @@ void update(cxd5602pwbimu_data_t dat)
   // - Coordinate frame transformations
   // This replaces the old Madgwick filter + RK4 integration
 
-  // バイアス補正前の生の値を保存（バイアス更新用）
-  float raw_acceleration_x = estimated_acceleration_x;
-  float raw_acceleration_y = estimated_acceleration_y;
-  float raw_acceleration_z = estimated_acceleration_z;
-
-  // バイアス補正を適用（初期化済みの場合）
-  if (bias_initialized)
-  {
-    estimated_acceleration_x -= acceleration_bias_x;
-    estimated_acceleration_y -= acceleration_bias_y;
-    estimated_acceleration_z -= acceleration_bias_z;
-  }
 
   // 加速度とジャイロの大きさを計算（ZUPT判定用）
   float accel_magnitude = sqrt(estimated_acceleration_x * estimated_acceleration_x +
@@ -428,10 +426,9 @@ void update(cxd5602pwbimu_data_t dat)
     velocity[2] = 0.0;
 
     // 静止時はバイアスを連続更新（温度ドリフト等に追従）
-    // 重要: バイアス補正前の生の値を使う！
     if (bias_initialized)
     {
-      update_acceleration_bias(raw_acceleration_x, raw_acceleration_y, raw_acceleration_z);
+      update_acceleration_bias(sensor_based_acceleration_x, sensor_based_acceleration_y, sensor_based_acceleration_z);
     }
   }
 
