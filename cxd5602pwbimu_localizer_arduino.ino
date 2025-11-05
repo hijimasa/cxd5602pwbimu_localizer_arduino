@@ -14,7 +14,8 @@ extern "C"
 #define CXD5602PWBIMU_DEVPATH "/dev/imu0"
 #define MAX_NFIFO (1)
 
-#define GRAVITY_AMOUNT 9.80665f
+#define GRAVITY_AMOUNT 9.7975f // Tokyo Japan
+// #define GRAVITY_AMOUNT 9.80665f // Standard
 #define EARTH_ROTATION_SPEED_AMOUNT 7.2921159e-5
 
 #define MESUREMENT_FREQUENCY 240 // 1920
@@ -323,7 +324,7 @@ void update(cxd5602pwbimu_data_t dat)
   estimated_rotation_speed_y = apply_causal_gaussian_filter(mesuared_rotation_speed_y, current_list_num);
   estimated_rotation_speed_z = apply_causal_gaussian_filter(mesuared_rotation_speed_z, current_list_num);
 
-    // バイアス補正を適用（初期化済みの場合）
+  // バイアス補正を適用（初期化済みの場合）
   if (bias_initialized)
   {
     estimated_acceleration_x -= acceleration_bias_x;
@@ -374,7 +375,6 @@ void update(cxd5602pwbimu_data_t dat)
   // - Gravity vector tracking and removal
   // - Coordinate frame transformations
   // This replaces the old Madgwick filter + RK4 integration
-
 
   // 加速度とジャイロの大きさを計算（ZUPT判定用）
   float accel_magnitude = sqrt(estimated_acceleration_x * estimated_acceleration_x +
