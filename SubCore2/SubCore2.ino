@@ -27,6 +27,7 @@ static bool ahrs_initialized = false;
 // Bias data received from MainCore
 static float accel_bias[3] = {0.0f, 0.0f, 0.0f};
 static bool bias_initialized = false;
+static bool init_complete = false; // Wait for initialization from MainCore
 
 // Statistics tracking
 static uint32_t loop_count = 0;
@@ -66,7 +67,7 @@ void setup()
   // Send startup notification to MainCore
   static ProcessingStats_t startup_stats;
   startup_stats.core_id = 2;
-  startup_stats.loop_count = 999;  // Special value to indicate setup() completed
+  startup_stats.loop_count = 999; // Special value to indicate setup() completed
   startup_stats.actual_rate_hz = 0.0f;
   startup_stats.dropped_messages = 0;
 
@@ -108,7 +109,13 @@ void loop()
     accel_bias[0] = init_params->initial_accel_bias[0];
     accel_bias[1] = init_params->initial_accel_bias[1];
     accel_bias[2] = init_params->initial_accel_bias[2];
+
+    // Set gyro offset from MainCore's learning
+    fusionOffset.gyroscopeOffset.axis.x = init_params->gyro_offset[0];
+    fusionOffset.gyroscopeOffset.axis.y = init_params->gyro_offset[1];
+    fusionOffset.gyroscopeOffset.axis.z = init_params->gyro_offset[2];
     bias_initialized = init_params->bias_initialized;
+    init_complete = true; // Now ready to process data
 
     return;
   }
@@ -121,6 +128,12 @@ void loop()
     accel_bias[1] = bias_data->accel_bias[1];
     accel_bias[2] = bias_data->accel_bias[2];
     bias_initialized = bias_data->initialized;
+    return;
+  }
+
+  // Skip data processing until initialization is complete
+  if (!init_complete)
+  {
     return;
   }
 
@@ -192,7 +205,7 @@ void loop()
   ahrs_data.dt = filtered->dt;
 
   // Send to MainCore (which will forward to SubCore3)
-  MP.Send(MSG_ID_AHRS, &ahrs_data, 0);  // 0 = MainCore
+  MP.Send(MSG_ID_AHRS, &ahrs_data, 0); // 0 = MainCore
 
   // Update loop count
   loop_count++;
@@ -203,9 +216,9 @@ void loop()
   {
     static ProcessingStats_t stats;
     stats.core_id = 2;
-    stats.loop_count = loop_count;  // Use successful message count
+    stats.loop_count = loop_count; // Use successful message count
     stats.actual_rate_hz = (loop_count - stats_loop_count_start) / 5.0f;
-    stats.dropped_messages = wrong_msgid_count;  // Only count wrong message IDs
+    stats.dropped_messages = wrong_msgid_count; // Only count wrong message IDs
 
     MP.Send(MSG_ID_STATS, &stats, 0); // Send to MainCore
 

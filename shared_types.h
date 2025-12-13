@@ -24,13 +24,13 @@
 #define GYRO_BIAS_DRIFT (0.39f * M_PI / 180.0f)
 #define GYRO_OBSERVATION_NOISE_VARIANCE (GYRO_NOISE_AMOUNT * GYRO_NOISE_AMOUNT)
 #define ACCEL_OBSERVATION_NOISE_VARIANCE (ACCEL_NOISE_AMOUNT * ACCEL_NOISE_AMOUNT)
-#define PROCESS_NOISE_VARIANCE (1.0e-7)
+#define PROCESS_NOISE_VARIANCE (5.0e-8)
 
-#define LIST_SIZE 4
-#define SIGMA_K 1.0f
+#define LIST_SIZE 16
+#define SIGMA_K 2.0f
 
 // Fusion AHRS settings
-#define FUSION_AHRS_GAIN 0.5f
+#define FUSION_AHRS_GAIN 0.1f
 #define FUSION_GYRO_RANGE 2000.0f
 #define FUSION_ACCEL_REJECTION 10.0f
 #define FUSION_RECOVERY_TRIGGER_PERIOD (5 * MESUREMENT_FREQUENCY)
@@ -140,6 +140,7 @@ typedef struct
 {
   float initial_quaternion[4];
   float initial_accel_bias[3];
+  float gyro_offset[3];
   bool bias_initialized;
 } InitParams_t;
 

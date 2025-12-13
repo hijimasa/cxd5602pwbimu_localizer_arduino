@@ -13,9 +13,6 @@
 #include <MP.h>
 #include "shared_types.h"
 
-#define LIST_SIZE 4
-#define SIGMA_K 1.0f
-
 // Ring buffer for Gaussian filter
 static float measured_accel_x[LIST_SIZE];
 static float measured_accel_y[LIST_SIZE];
@@ -25,6 +22,7 @@ static float measured_gyro_y[LIST_SIZE];
 static float measured_gyro_z[LIST_SIZE];
 static int current_list_num = 0;
 static int old_timestamp = -1;
+static bool buffer_initialized = false;
 
 // Gaussian kernel (initialized once)
 static float kernel[LIST_SIZE];
@@ -75,16 +73,8 @@ void setup()
   // Initialize Gaussian kernel
   initializeKernel();
 
-  // Initialize ring buffers with zero
-  for (int i = 0; i < LIST_SIZE; i++)
-  {
-    measured_accel_x[i] = 0.0f;
-    measured_accel_y[i] = 0.0f;
-    measured_accel_z[i] = 0.0f;
-    measured_gyro_x[i] = 0.0f;
-    measured_gyro_y[i] = 0.0f;
-    measured_gyro_z[i] = 0.0f;
-  }
+  // Ring buffers will be initialized with first real data
+  // to avoid transient response from zero-filled buffers
 
   // Set receive timeout to blocking mode for real-time processing
   MP.RecvTimeout(MP_RECV_BLOCKING);
@@ -135,6 +125,21 @@ void loop()
     }
   }
   old_timestamp = raw_data->timestamp;
+
+  // Initialize ring buffer with first data sample to avoid zero transient
+  if (!buffer_initialized)
+  {
+    for (int i = 0; i < LIST_SIZE; i++)
+    {
+      measured_accel_x[i] = raw_data->ax;
+      measured_accel_y[i] = raw_data->ay;
+      measured_accel_z[i] = raw_data->az;
+      measured_gyro_x[i] = raw_data->gx;
+      measured_gyro_y[i] = raw_data->gy;
+      measured_gyro_z[i] = raw_data->gz;
+    }
+    buffer_initialized = true;
+  }
 
   // Store raw data in ring buffer
   measured_accel_x[current_list_num] = raw_data->ax;

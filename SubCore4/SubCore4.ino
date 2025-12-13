@@ -15,14 +15,16 @@
 
 // Motion decay parameters
 #define MOTION_THRESHOLD 0.1f
-#define MIN_DECAY 0.90f
-#define MAX_DECAY 0.999f
+// Decay rates per second (will be converted to per-sample)
+#define MIN_DECAY_PER_SEC 0.90f  // 90% per second when stationary
+#define MAX_DECAY_PER_SEC 0.999f // 99.9% per second when moving
 
 // State variables
 static float velocity[3] = {0.0f, 0.0f, 0.0f};
 static float position[3] = {0.0f, 0.0f, 0.0f};
 static float old_acceleration[3] = {0.0f, 0.0f, 0.0f};
 static float old_velocity[3] = {0.0f, 0.0f, 0.0f};
+static bool integration_initialized = false;
 
 // Output counter for MainCore
 static int output_counter = 0;
@@ -77,14 +79,25 @@ void loop()
   ZuptData_t *zupt = (ZuptData_t *)msgdata;
   float dt = zupt->dt;
 
+  // Initialize integration with first data to avoid jump
+  if (!integration_initialized)
+  {
+    old_acceleration[0] = zupt->earth_accel[0];
+    old_acceleration[1] = zupt->earth_accel[1];
+    old_acceleration[2] = zupt->earth_accel[2];
+    integration_initialized = true;
+  }
+
   // Calculate motion magnitude for exponential decay
   float motion_magnitude = zupt->accel_magnitude + zupt->gyro_magnitude * 5.0f;
 
   // Apply exponential velocity decay when motion is small
+  // Convert per-second decay to per-sample using: decay_per_sample = decay_per_sec^dt
   if (motion_magnitude < MOTION_THRESHOLD)
   {
     float normalized_motion = motion_magnitude / MOTION_THRESHOLD;
-    float decay_factor = MIN_DECAY + (MAX_DECAY - MIN_DECAY) * normalized_motion;
+    float decay_per_sec = MIN_DECAY_PER_SEC + (MAX_DECAY_PER_SEC - MIN_DECAY_PER_SEC) * normalized_motion;
+    float decay_factor = powf(decay_per_sec, dt);
 
     velocity[0] *= decay_factor;
     velocity[1] *= decay_factor;
@@ -107,6 +120,22 @@ void loop()
     velocity[0] = 0.0f;
     velocity[1] = 0.0f;
     velocity[2] = 0.0f;
+  }
+  else
+  {
+    // Apply velocity magnitude limit to prevent runaway integration
+    // This helps contain accumulated errors at high sampling rates
+    float vel_magnitude = sqrtf(velocity[0] * velocity[0] + 
+                                  velocity[1] * velocity[1] + 
+                                  velocity[2] * velocity[2]);
+    const float MAX_VELOCITY = 5.0f; // m/s (reasonable human walking/running speed)
+    if (vel_magnitude > MAX_VELOCITY)
+    {
+      float scale = MAX_VELOCITY / vel_magnitude;
+      velocity[0] *= scale;
+      velocity[1] *= scale;
+      velocity[2] *= scale;
+    }
   }
 
   // Store for next iteration

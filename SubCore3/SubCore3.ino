@@ -14,18 +14,25 @@
 #include "shared_types.h"
 
 // ZUPT detection parameters
-#define ACCEL_THRESHOLD 0.05f                        // m/s^2
-#define GYRO_THRESHOLD 0.005f                        // rad/s (~0.86 deg/s)
+#define ACCEL_THRESHOLD 0.08f                        // m/s^2 (increased for 1920Hz)
+#define GYRO_THRESHOLD 0.008f                        // rad/s (~0.46 deg/s, increased for 1920Hz)
 #define REQUIRED_SAMPLES (MESUREMENT_FREQUENCY / 10) // 0.1 second
+#define MOTION_WINDOW_SIZE 8                         // Moving average for noise reduction
 
 // Bias learning parameters
-#define BIAS_LEARNING_RATE 0.01f
+#define BIAS_LEARNING_RATE (0.01f / (MESUREMENT_FREQUENCY / 1920.0f))
 
 // State variables
 static int zero_velocity_counter = 0;
 static float accel_bias[3] = {0.0f, 0.0f, 0.0f};
 static bool bias_initialized = false;
 static int bias_update_counter = 0;
+static bool init_complete = false; // Wait for initialization from MainCore
+
+// Moving average for motion detection
+static float accel_mag_buffer[MOTION_WINDOW_SIZE] = {0};
+static float gyro_mag_buffer[MOTION_WINDOW_SIZE] = {0};
+static int motion_buffer_idx = 0;
 
 // Statistics tracking
 static uint32_t loop_count = 0;
@@ -36,7 +43,24 @@ static uint32_t wrong_msgid_count = 0;
 
 bool detectStationary(float accel_magnitude, float gyro_magnitude)
 {
-  if (accel_magnitude < ACCEL_THRESHOLD && gyro_magnitude < GYRO_THRESHOLD)
+  // Update moving average buffers
+  accel_mag_buffer[motion_buffer_idx] = accel_magnitude;
+  gyro_mag_buffer[motion_buffer_idx] = gyro_magnitude;
+  motion_buffer_idx = (motion_buffer_idx + 1) % MOTION_WINDOW_SIZE;
+
+  // Calculate smoothed magnitudes
+  float smoothed_accel = 0.0f;
+  float smoothed_gyro = 0.0f;
+  for (int i = 0; i < MOTION_WINDOW_SIZE; i++)
+  {
+    smoothed_accel += accel_mag_buffer[i];
+    smoothed_gyro += gyro_mag_buffer[i];
+  }
+  smoothed_accel /= MOTION_WINDOW_SIZE;
+  smoothed_gyro /= MOTION_WINDOW_SIZE;
+
+  // Check against thresholds using smoothed values
+  if (smoothed_accel < ACCEL_THRESHOLD && smoothed_gyro < GYRO_THRESHOLD)
   {
     zero_velocity_counter++;
   }
@@ -50,6 +74,9 @@ bool detectStationary(float accel_magnitude, float gyro_magnitude)
 
 void updateBias(float sensor_ax, float sensor_ay, float sensor_az)
 {
+  // During stationary period, sensor_accel should be zero
+  // Any non-zero value is bias error, so we update to reduce it
+  // Use small learning rate to slowly converge
   accel_bias[0] += BIAS_LEARNING_RATE * sensor_ax;
   accel_bias[1] += BIAS_LEARNING_RATE * sensor_ay;
   accel_bias[2] += BIAS_LEARNING_RATE * sensor_az;
@@ -74,6 +101,13 @@ void setup()
 {
   // Initialize MP library
   MP.begin();
+
+  // Initialize motion detection buffers
+  for (int i = 0; i < MOTION_WINDOW_SIZE; i++)
+  {
+    accel_mag_buffer[i] = 0.0f;
+    gyro_mag_buffer[i] = 0.0f;
+  }
 
   // Set receive timeout to blocking mode
   MP.RecvTimeout(MP_RECV_BLOCKING);
@@ -110,6 +144,13 @@ void loop()
     accel_bias[1] = init_params->initial_accel_bias[1];
     accel_bias[2] = init_params->initial_accel_bias[2];
     bias_initialized = init_params->bias_initialized;
+    init_complete = true; // Now ready to process data
+    return;
+  }
+
+  // Skip data processing until initialization is complete
+  if (!init_complete)
+  {
     return;
   }
 

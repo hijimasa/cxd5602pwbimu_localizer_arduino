@@ -162,26 +162,10 @@ bool imu_data_initialize(cxd5602pwbimu_data_t dat)
 
 void initialize_acceleration_bias(cxd5602pwbimu_data_t dat)
 {
-  float ax = dat.ax / GRAVITY_AMOUNT;
-  float ay = dat.ay / GRAVITY_AMOUNT;
-  float az = dat.az / GRAVITY_AMOUNT;
-
-  FusionVector gyroscope = {
-      dat.gx * 180.0f / (float)M_PI,
-      dat.gy * 180.0f / (float)M_PI,
-      dat.gz * 180.0f / (float)M_PI};
-  gyroscope = FusionOffsetUpdate(&fusionOffset, gyroscope);
-
-  FusionVector accelerometer = {ax, ay, az};
-
-  float dt = 1.0f / MESUREMENT_FREQUENCY;
-  FusionAhrsUpdateNoMagnetometer(&fusionAhrs, gyroscope, accelerometer, dt);
-
-  FusionVector linearAccel = FusionAhrsGetLinearAcceleration(&fusionAhrs);
-
-  acceleration_bias[0] += linearAccel.axis.x * GRAVITY_AMOUNT;
-  acceleration_bias[1] += linearAccel.axis.y * GRAVITY_AMOUNT;
-  acceleration_bias[2] += linearAccel.axis.z * GRAVITY_AMOUNT;
+  // Accumulate sensor accelerations (in sensor frame)
+  acceleration_bias[0] += dat.ax;
+  acceleration_bias[1] += dat.ay;
+  acceleration_bias[2] += dat.az;
   bias_sample_count++;
 }
 
@@ -262,11 +246,17 @@ void setup()
   }
 
   // Set initial quaternion to Fusion AHRS
+  // Normalize quaternion to ensure unit length
+  float quat_norm = sqrtf(initial_quaternion[0] * initial_quaternion[0] +
+                          initial_quaternion[1] * initial_quaternion[1] +
+                          initial_quaternion[2] * initial_quaternion[2] +
+                          initial_quaternion[3] * initial_quaternion[3]);
+  
   FusionQuaternion initialQuat;
-  initialQuat.element.w = initial_quaternion[0];
-  initialQuat.element.x = initial_quaternion[1];
-  initialQuat.element.y = initial_quaternion[2];
-  initialQuat.element.z = initial_quaternion[3];
+  initialQuat.element.w = initial_quaternion[0] / quat_norm;
+  initialQuat.element.x = initial_quaternion[1] / quat_norm;
+  initialQuat.element.y = initial_quaternion[2] / quat_norm;
+  initialQuat.element.z = initial_quaternion[3] / quat_norm;
   FusionAhrsSetQuaternion(&fusionAhrs, initialQuat);
   fusionAhrs.initialising = false;
   fusionAhrs.rampedGain = FUSION_AHRS_GAIN;
@@ -288,10 +278,49 @@ void setup()
     }
   }
 
+  // Calculate average sensor acceleration
   acceleration_bias[0] /= bias_sample_count;
   acceleration_bias[1] /= bias_sample_count;
   acceleration_bias[2] /= bias_sample_count;
+
+  // Subtract expected gravity vector in sensor frame to get bias
+  // Convert initial quaternion to gravity vector in sensor frame
+  float qw = initial_quaternion[0];
+  float qx = initial_quaternion[1];
+  float qy = initial_quaternion[2];
+  float qz = initial_quaternion[3];
+
+  // Gravity in Earth frame is [0, 0, -GRAVITY_AMOUNT]
+  // Rotate to sensor frame using inverse quaternion
+  float gx_sensor = 2.0f * (qx * qz - qw * qy) * GRAVITY_AMOUNT;
+  float gy_sensor = 2.0f * (qy * qz + qw * qx) * GRAVITY_AMOUNT;
+  float gz_sensor = (qw * qw - qx * qx - qy * qy + qz * qz) * GRAVITY_AMOUNT;
+
+  // Bias = measured - expected
+  acceleration_bias[0] -= gx_sensor;
+  acceleration_bias[1] -= gy_sensor;
+  acceleration_bias[2] -= gz_sensor;
+
   bias_initialized = true;
+
+#ifdef VERBOSE_OUTPUT
+  Serial.print("MainCore: Accel bias = [");
+  Serial.print(acceleration_bias[0], 4);
+  Serial.print(", ");
+  Serial.print(acceleration_bias[1], 4);
+  Serial.print(", ");
+  Serial.print(acceleration_bias[2], 4);
+  Serial.println("] m/s^2");
+  Serial.print("MainCore: Initial quaternion = [");
+  Serial.print(initial_quaternion[0], 4);
+  Serial.print(", ");
+  Serial.print(initial_quaternion[1], 4);
+  Serial.print(", ");
+  Serial.print(initial_quaternion[2], 4);
+  Serial.print(", ");
+  Serial.print(initial_quaternion[3], 4);
+  Serial.println("]");
+#endif
 
 #ifdef VERBOSE_OUTPUT
   Serial.println("MainCore: Starting SubCores...");
@@ -318,11 +347,26 @@ void setup()
   init_params.initial_accel_bias[0] = acceleration_bias[0];
   init_params.initial_accel_bias[1] = acceleration_bias[1];
   init_params.initial_accel_bias[2] = acceleration_bias[2];
+  init_params.gyro_offset[0] = fusionOffset.gyroscopeOffset.axis.x;
+  init_params.gyro_offset[1] = fusionOffset.gyroscopeOffset.axis.y;
+  init_params.gyro_offset[2] = fusionOffset.gyroscopeOffset.axis.z;
   init_params.bias_initialized = bias_initialized;
 
   // Send to SubCore2 (AHRS) and SubCore3 (ZUPT)
-  MP.Send(MSG_ID_INIT_COMPLETE, &init_params, SUBCORE_AHRS);
-  MP.Send(MSG_ID_INIT_COMPLETE, &init_params, SUBCORE_ZUPT);
+  // Retry to ensure delivery before data processing starts
+  int retry_count = 0;
+  while (MP.Send(MSG_ID_INIT_COMPLETE, &init_params, SUBCORE_AHRS) < 0 && retry_count++ < 10)
+  {
+    delay(10);
+  }
+  retry_count = 0;
+  while (MP.Send(MSG_ID_INIT_COMPLETE, &init_params, SUBCORE_ZUPT) < 0 && retry_count++ < 10)
+  {
+    delay(10);
+  }
+
+  // Additional delay to ensure SubCores process initialization before data flow
+  delay(50);
 
 #ifdef VERBOSE_OUTPUT
   Serial.println("MainCore: Initialization complete. Starting data acquisition at 1920Hz.");
