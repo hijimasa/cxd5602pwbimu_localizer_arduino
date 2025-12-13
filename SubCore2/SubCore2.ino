@@ -11,10 +11,11 @@
 #endif
 
 #include <MP.h>
-#include "../shared_types.h"
+#include "shared_types.h"
 
 // Fusion library
-extern "C" {
+extern "C"
+{
 #include "src/Fusion/Fusion.h"
 }
 
@@ -27,10 +28,23 @@ static bool ahrs_initialized = false;
 static float accel_bias[3] = {0.0f, 0.0f, 0.0f};
 static bool bias_initialized = false;
 
+// Statistics tracking
+static uint32_t loop_count = 0;
+static uint32_t last_stats_time = 0;
+static uint32_t stats_loop_count_start = 0;
+static uint32_t recv_error_count = 0;
+static uint32_t wrong_msgid_count = 0;
+static uint32_t total_loop_entry_count = 0;
+
 void setup()
 {
   // Initialize MP library
   MP.begin();
+
+  // Set receive timeout to blocking mode (like other SubCores)
+  MP.RecvTimeout(MP_RECV_BLOCKING);
+
+  last_stats_time = millis();
 
   // Initialize Fusion AHRS
   FusionOffsetInitialise(&fusionOffset, MESUREMENT_FREQUENCY);
@@ -38,34 +52,45 @@ void setup()
 
   // Configure Fusion AHRS settings
   const FusionAhrsSettings settings = {
-    .convention = FusionConventionNwu,
-    .gain = FUSION_AHRS_GAIN,
-    .gyroscopeRange = FUSION_GYRO_RANGE,
-    .accelerationRejection = FUSION_ACCEL_REJECTION,
-    .magneticRejection = 0.0f,
-    .recoveryTriggerPeriod = FUSION_RECOVERY_TRIGGER_PERIOD,
+      .convention = FusionConventionNwu,
+      .gain = FUSION_AHRS_GAIN,
+      .gyroscopeRange = FUSION_GYRO_RANGE,
+      .accelerationRejection = FUSION_ACCEL_REJECTION,
+      .magneticRejection = 0.0f,
+      .recoveryTriggerPeriod = FUSION_RECOVERY_TRIGGER_PERIOD,
   };
   FusionAhrsSetSettings(&fusionAhrs, &settings);
 
   ahrs_initialized = true;
 
-  // Set receive timeout to blocking mode
-  MP.RecvTimeout(MP_RECV_BLOCKING);
+  // Send startup notification to MainCore
+  static ProcessingStats_t startup_stats;
+  startup_stats.core_id = 2;
+  startup_stats.loop_count = 999;  // Special value to indicate setup() completed
+  startup_stats.actual_rate_hz = 0.0f;
+  startup_stats.dropped_messages = 0;
+
+  MP.Send(MSG_ID_STATS, &startup_stats, 0);
 }
 
 void loop()
 {
+  total_loop_entry_count++;
+
   int8_t msgid;
   void *msgdata;
 
-  // Wait for message
+  // Try to receive message (non-blocking)
   int ret = MP.Recv(&msgid, &msgdata);
-  if (ret < 0) {
+  if (ret < 0)
+  {
+    // No message available - this is normal in non-blocking mode
     return;
   }
 
   // Handle initialization message from MainCore
-  if (msgid == MSG_ID_INIT_COMPLETE) {
+  if (msgid == MSG_ID_INIT_COMPLETE)
+  {
     InitParams_t *init_params = (InitParams_t *)msgdata;
 
     // Set initial quaternion
@@ -89,7 +114,8 @@ void loop()
   }
 
   // Handle bias update from SubCore3
-  if (msgid == MSG_ID_BIAS_DATA) {
+  if (msgid == MSG_ID_BIAS_DATA)
+  {
     BiasData_t *bias_data = (BiasData_t *)msgdata;
     accel_bias[0] = bias_data->accel_bias[0];
     accel_bias[1] = bias_data->accel_bias[1];
@@ -99,7 +125,9 @@ void loop()
   }
 
   // Process filtered IMU data
-  if (msgid != MSG_ID_FILTERED) {
+  if (msgid != MSG_ID_FILTERED)
+  {
+    wrong_msgid_count++;
     return;
   }
 
@@ -110,7 +138,8 @@ void loop()
   float corrected_ay = filtered->ay;
   float corrected_az = filtered->az;
 
-  if (bias_initialized) {
+  if (bias_initialized)
+  {
     corrected_ax -= accel_bias[0];
     corrected_ay -= accel_bias[1];
     corrected_az -= accel_bias[2];
@@ -118,18 +147,16 @@ void loop()
 
   // Prepare gyroscope data (convert rad/s to deg/s)
   FusionVector gyroscope = {
-    filtered->gx * 180.0f / (float)M_PI,
-    filtered->gy * 180.0f / (float)M_PI,
-    filtered->gz * 180.0f / (float)M_PI
-  };
+      filtered->gx * 180.0f / (float)M_PI,
+      filtered->gy * 180.0f / (float)M_PI,
+      filtered->gz * 180.0f / (float)M_PI};
   gyroscope = FusionOffsetUpdate(&fusionOffset, gyroscope);
 
   // Prepare accelerometer data (convert to g units)
   FusionVector accelerometer = {
-    corrected_ax / GRAVITY_AMOUNT,
-    corrected_ay / GRAVITY_AMOUNT,
-    corrected_az / GRAVITY_AMOUNT
-  };
+      corrected_ax / GRAVITY_AMOUNT,
+      corrected_ay / GRAVITY_AMOUNT,
+      corrected_az / GRAVITY_AMOUNT};
 
   // Update AHRS
   FusionAhrsUpdateNoMagnetometer(&fusionAhrs, gyroscope, accelerometer, filtered->dt);
@@ -164,6 +191,28 @@ void loop()
 
   ahrs_data.dt = filtered->dt;
 
-  // Send to SubCore3 (ZUPT)
-  MP.Send(MSG_ID_AHRS, &ahrs_data, SUBCORE_ZUPT);
+  // Send to MainCore (which will forward to SubCore3)
+  MP.Send(MSG_ID_AHRS, &ahrs_data, 0);  // 0 = MainCore
+
+  // Update loop count
+  loop_count++;
+
+  // Send statistics periodically (every 5 seconds)
+  uint32_t current_time = millis();
+  if (current_time - last_stats_time >= 5000)
+  {
+    static ProcessingStats_t stats;
+    stats.core_id = 2;
+    stats.loop_count = loop_count;  // Use successful message count
+    stats.actual_rate_hz = (loop_count - stats_loop_count_start) / 5.0f;
+    stats.dropped_messages = wrong_msgid_count;  // Only count wrong message IDs
+
+    MP.Send(MSG_ID_STATS, &stats, 0); // Send to MainCore
+
+    last_stats_time = current_time;
+    stats_loop_count_start = loop_count;
+
+    // Reset wrong_msgid counter
+    wrong_msgid_count = 0;
+  }
 }

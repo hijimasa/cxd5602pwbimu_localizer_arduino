@@ -1,17 +1,45 @@
 /**
  * @file SubCore5.ino
- * @brief Serial Output Core
+ * @brief Serial Output Core (DEPRECATED - NO LONGER USED)
  *
- * SubCore5: Receives position data and outputs via Serial
- * at 30Hz rate (same format as original)
+ * This SubCore is no longer used. Serial output is now handled
+ * by MainCore to avoid Serial resource conflicts between cores.
+ *
+ * Serial output functionality has been moved to MainCore which
+ * receives position data from SubCore4 and outputs it directly.
+ *
+ * The Spresense multicore system now uses only 4 SubCores:
+ *   SubCore1: Gaussian Filter
+ *   SubCore2: AHRS (Fusion)
+ *   SubCore3: ZUPT & Bias Learning
+ *   SubCore4: Position Integration
+ *   MainCore: IMU Data Acquisition + Serial Output
  */
+
+// This file is kept for reference but should not be compiled or used
+
+#if (SUBCORE != 5)
+#error "Core selection is wrong!! Must select SubCore5"
+#endif
+
+void setup()
+{
+  // Do nothing - this core should not be started
+}
+
+void loop()
+{
+  // Do nothing
+}
+
+#if 0 // DISABLED - This code is no longer active
 
 #if (SUBCORE != 5)
 #error "Core selection is wrong!! Must select SubCore5"
 #endif
 
 #include <MP.h>
-#include "../shared_types.h"
+#include "shared_types.h"
 
 void setup()
 {
@@ -32,11 +60,13 @@ void loop()
 
   // Wait for position data from SubCore4
   int ret = MP.Recv(&msgid, &pos_data);
-  if (ret < 0) {
+  if (ret < 0)
+  {
     return;
   }
 
-  if (msgid != MSG_ID_POSITION) {
+  if (msgid != MSG_ID_POSITION)
+  {
     return;
   }
 
@@ -65,3 +95,5 @@ void loop()
                 *(unsigned int *)&pos_data->position[1],
                 *(unsigned int *)&pos_data->position[2]);
 }
+
+#endif // DISABLED
