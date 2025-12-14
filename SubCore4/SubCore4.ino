@@ -13,12 +13,6 @@
 #include <MP.h>
 #include "shared_types.h"
 
-// Motion decay parameters
-#define MOTION_THRESHOLD 0.1f
-// Decay rates per second (will be converted to per-sample)
-#define MIN_DECAY_PER_SEC 0.90f  // 90% per second when stationary
-#define MAX_DECAY_PER_SEC 0.999f // 99.9% per second when moving
-
 // State variables
 static float velocity[3] = {0.0f, 0.0f, 0.0f};
 static float position[3] = {0.0f, 0.0f, 0.0f};
@@ -88,26 +82,22 @@ void loop()
     integration_initialized = true;
   }
 
-  // Calculate motion magnitude for exponential decay
-  float motion_magnitude = zupt->accel_magnitude + zupt->gyro_magnitude * 5.0f;
+  // Calculate gyro magnitude from filtered (not bias-corrected) gyro
+  // This matches the old implementation which used raw filtered gyro for motion detection
+  float gyro_magnitude_filtered = sqrtf(
+      zupt->gyro_filtered[0] * zupt->gyro_filtered[0] +
+      zupt->gyro_filtered[1] * zupt->gyro_filtered[1] +
+      zupt->gyro_filtered[2] * zupt->gyro_filtered[2]);
 
-  // Apply exponential velocity decay when motion is small
-  // Convert per-second decay to per-sample using: decay_per_sample = decay_per_sec^dt
-  if (motion_magnitude < MOTION_THRESHOLD)
-  {
-    float normalized_motion = motion_magnitude / MOTION_THRESHOLD;
-    float decay_per_sec = MIN_DECAY_PER_SEC + (MAX_DECAY_PER_SEC - MIN_DECAY_PER_SEC) * normalized_motion;
-    float decay_factor = powf(decay_per_sec, dt);
-
-    velocity[0] *= decay_factor;
-    velocity[1] *= decay_factor;
-    velocity[2] *= decay_factor;
-  }
+  // Apply dead zone to small accelerations to prevent noise integration
+  float accel_x = zupt->earth_accel[0];
+  float accel_y = zupt->earth_accel[1];
+  float accel_z = zupt->earth_accel[2];
 
   // Velocity integration (trapezoidal rule)
-  velocity[0] += (zupt->earth_accel[0] + old_acceleration[0]) / 2.0f * dt;
-  velocity[1] += (zupt->earth_accel[1] + old_acceleration[1]) / 2.0f * dt;
-  velocity[2] += (zupt->earth_accel[2] + old_acceleration[2]) / 2.0f * dt;
+  velocity[0] += (accel_x + old_acceleration[0]) / 2.0f * dt;
+  velocity[1] += (accel_y + old_acceleration[1]) / 2.0f * dt;
+  velocity[2] += (accel_z + old_acceleration[2]) / 2.0f * dt;
 
   // Position integration (trapezoidal rule)
   position[0] += (velocity[0] + old_velocity[0]) / 2.0f * dt;
@@ -120,14 +110,20 @@ void loop()
     velocity[0] = 0.0f;
     velocity[1] = 0.0f;
     velocity[2] = 0.0f;
+
+    // Bias update is disabled for now to diagnose drift issues
+    // The initial bias from MainCore should be sufficient
+    // Continuous bias update may cause oscillation or over-correction
+    // TODO: Re-enable with proper convergence detection
+    (void)zupt->linear_accel_raw; // Suppress unused warning
   }
   else
   {
     // Apply velocity magnitude limit to prevent runaway integration
     // This helps contain accumulated errors at high sampling rates
-    float vel_magnitude = sqrtf(velocity[0] * velocity[0] + 
-                                  velocity[1] * velocity[1] + 
-                                  velocity[2] * velocity[2]);
+    float vel_magnitude = sqrtf(velocity[0] * velocity[0] +
+                                velocity[1] * velocity[1] +
+                                velocity[2] * velocity[2]);
     const float MAX_VELOCITY = 5.0f; // m/s (reasonable human walking/running speed)
     if (vel_magnitude > MAX_VELOCITY)
     {
@@ -138,10 +134,10 @@ void loop()
     }
   }
 
-  // Store for next iteration
-  old_acceleration[0] = zupt->earth_accel[0];
-  old_acceleration[1] = zupt->earth_accel[1];
-  old_acceleration[2] = zupt->earth_accel[2];
+  // Store for next iteration (with dead zone applied)
+  old_acceleration[0] = accel_x;
+  old_acceleration[1] = accel_y;
+  old_acceleration[2] = accel_z;
   old_velocity[0] = velocity[0];
   old_velocity[1] = velocity[1];
   old_velocity[2] = velocity[2];
@@ -168,10 +164,10 @@ void loop()
     pos_data.acceleration[0] = zupt->earth_accel[0];
     pos_data.acceleration[1] = zupt->earth_accel[1];
     pos_data.acceleration[2] = zupt->earth_accel[2];
-    pos_data.gyro[0] = zupt->gyro_magnitude; // simplified - just magnitude
-    pos_data.gyro[1] = 0.0f;
-    pos_data.gyro[2] = 0.0f;
-    pos_data.temp = 0.0f;
+    pos_data.gyro[0] = zupt->gyro_corrected[0];
+    pos_data.gyro[1] = zupt->gyro_corrected[1];
+    pos_data.gyro[2] = zupt->gyro_corrected[2];
+    pos_data.temp = zupt->temp;
     pos_data.is_stationary = zupt->is_stationary;
 
     // Send position data to MainCore (not SubCore5)

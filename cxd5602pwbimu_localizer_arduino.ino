@@ -160,9 +160,11 @@ bool imu_data_initialize(cxd5602pwbimu_data_t dat)
   return true;
 }
 
+// 加速度バイアス初期学習関数（setup()で使用）
+// 静止時の加速度を単純に累積し、後で期待される重力ベクトルを引く
 void initialize_acceleration_bias(cxd5602pwbimu_data_t dat)
 {
-  // Accumulate sensor accelerations (in sensor frame)
+  // 生の加速度データを累積（m/s^2単位）
   acceleration_bias[0] += dat.ax;
   acceleration_bias[1] += dat.ay;
   acceleration_bias[2] += dat.az;
@@ -251,7 +253,7 @@ void setup()
                           initial_quaternion[1] * initial_quaternion[1] +
                           initial_quaternion[2] * initial_quaternion[2] +
                           initial_quaternion[3] * initial_quaternion[3]);
-  
+
   FusionQuaternion initialQuat;
   initialQuat.element.w = initial_quaternion[0] / quat_norm;
   initialQuat.element.x = initial_quaternion[1] / quat_norm;
@@ -283,23 +285,37 @@ void setup()
   acceleration_bias[1] /= bias_sample_count;
   acceleration_bias[2] /= bias_sample_count;
 
-  // Subtract expected gravity vector in sensor frame to get bias
-  // Convert initial quaternion to gravity vector in sensor frame
+  // Calculate expected gravity vector in sensor frame using initial quaternion
+  // In Fusion NWU convention: accelerometer measures +Z when at rest (opposing gravity)
+  // So expected_accel in earth frame = [0, 0, +GRAVITY_AMOUNT]
+  // We need to rotate this into sensor frame using inverse quaternion
   float qw = initial_quaternion[0];
   float qx = initial_quaternion[1];
   float qy = initial_quaternion[2];
   float qz = initial_quaternion[3];
 
-  // Gravity in Earth frame is [0, 0, -GRAVITY_AMOUNT]
-  // Rotate to sensor frame using inverse quaternion
-  float gx_sensor = 2.0f * (qx * qz - qw * qy) * GRAVITY_AMOUNT;
-  float gy_sensor = 2.0f * (qy * qz + qw * qx) * GRAVITY_AMOUNT;
-  float gz_sensor = (qw * qw - qx * qx - qy * qy + qz * qz) * GRAVITY_AMOUNT;
+  // Rotation matrix from Earth to Sensor frame (transpose of sensor-to-earth)
+  // The quaternion represents sensor-to-earth, so we need the transpose for earth-to-sensor
+  float r00 = 1.0f - 2.0f * (qy * qy + qz * qz);
+  float r01 = 2.0f * (qx * qy + qw * qz);
+  float r02 = 2.0f * (qx * qz - qw * qy);
+  float r10 = 2.0f * (qx * qy - qw * qz);
+  float r11 = 1.0f - 2.0f * (qx * qx + qz * qz);
+  float r12 = 2.0f * (qy * qz + qw * qx);
+  float r20 = 2.0f * (qx * qz + qw * qy);
+  float r21 = 2.0f * (qy * qz - qw * qx);
+  float r22 = 1.0f - 2.0f * (qx * qx + qy * qy);
+
+  // Transform expected acceleration [0, 0, +g] from earth to sensor frame
+  // g_sensor = R^T * [0, 0, +g]
+  float expected_ax = r02 * GRAVITY_AMOUNT;
+  float expected_ay = r12 * GRAVITY_AMOUNT;
+  float expected_az = r22 * GRAVITY_AMOUNT;
 
   // Bias = measured - expected
-  acceleration_bias[0] -= gx_sensor;
-  acceleration_bias[1] -= gy_sensor;
-  acceleration_bias[2] -= gz_sensor;
+  acceleration_bias[0] -= expected_ax;
+  acceleration_bias[1] -= expected_ay;
+  acceleration_bias[2] -= expected_az;
 
   bias_initialized = true;
 
@@ -352,7 +368,7 @@ void setup()
   init_params.gyro_offset[2] = fusionOffset.gyroscopeOffset.axis.z;
   init_params.bias_initialized = bias_initialized;
 
-  // Send to SubCore2 (AHRS) and SubCore3 (ZUPT)
+  // Send to SubCore2 (AHRS), SubCore3 (ZUPT), and SubCore4 (Position)
   // Retry to ensure delivery before data processing starts
   int retry_count = 0;
   while (MP.Send(MSG_ID_INIT_COMPLETE, &init_params, SUBCORE_AHRS) < 0 && retry_count++ < 10)
@@ -361,6 +377,11 @@ void setup()
   }
   retry_count = 0;
   while (MP.Send(MSG_ID_INIT_COMPLETE, &init_params, SUBCORE_ZUPT) < 0 && retry_count++ < 10)
+  {
+    delay(10);
+  }
+  retry_count = 0;
+  while (MP.Send(MSG_ID_INIT_COMPLETE, &init_params, SUBCORE_POSITION) < 0 && retry_count++ < 10)
   {
     delay(10);
   }

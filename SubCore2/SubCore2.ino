@@ -146,18 +146,6 @@ void loop()
 
   ImuFilteredData_t *filtered = (ImuFilteredData_t *)msgdata;
 
-  // Apply bias correction
-  float corrected_ax = filtered->ax;
-  float corrected_ay = filtered->ay;
-  float corrected_az = filtered->az;
-
-  if (bias_initialized)
-  {
-    corrected_ax -= accel_bias[0];
-    corrected_ay -= accel_bias[1];
-    corrected_az -= accel_bias[2];
-  }
-
   // Prepare gyroscope data (convert rad/s to deg/s)
   FusionVector gyroscope = {
       filtered->gx * 180.0f / (float)M_PI,
@@ -166,10 +154,12 @@ void loop()
   gyroscope = FusionOffsetUpdate(&fusionOffset, gyroscope);
 
   // Prepare accelerometer data (convert to g units)
+  // Do NOT apply bias here - let AHRS see raw sensor data for accurate attitude
+  // Bias will be applied to the output (earth_accel) after gravity removal
   FusionVector accelerometer = {
-      corrected_ax / GRAVITY_AMOUNT,
-      corrected_ay / GRAVITY_AMOUNT,
-      corrected_az / GRAVITY_AMOUNT};
+      filtered->ax / GRAVITY_AMOUNT,
+      filtered->ay / GRAVITY_AMOUNT,
+      filtered->az / GRAVITY_AMOUNT};
 
   // Update AHRS
   FusionAhrsUpdateNoMagnetometer(&fusionAhrs, gyroscope, accelerometer, filtered->dt);
@@ -187,22 +177,91 @@ void loop()
   ahrs_data.quaternion[2] = fusionQuat.element.y;
   ahrs_data.quaternion[3] = fusionQuat.element.z;
 
-  // Earth frame acceleration (gravity removed, in m/s^2)
-  ahrs_data.earth_accel[0] = earthAccel.axis.x * GRAVITY_AMOUNT;
-  ahrs_data.earth_accel[1] = earthAccel.axis.y * GRAVITY_AMOUNT;
-  ahrs_data.earth_accel[2] = earthAccel.axis.z * GRAVITY_AMOUNT;
+  // Raw linear acceleration from AHRS (NOT bias corrected) - for bias learning
+  float raw_linear_ax = linearAccel.axis.x * GRAVITY_AMOUNT;
+  float raw_linear_ay = linearAccel.axis.y * GRAVITY_AMOUNT;
+  float raw_linear_az = linearAccel.axis.z * GRAVITY_AMOUNT;
+
+  ahrs_data.linear_accel_raw[0] = raw_linear_ax;
+  ahrs_data.linear_accel_raw[1] = raw_linear_ay;
+  ahrs_data.linear_accel_raw[2] = raw_linear_az;
 
   // Sensor frame acceleration (gravity removed, in m/s^2)
-  ahrs_data.sensor_accel[0] = linearAccel.axis.x * GRAVITY_AMOUNT;
-  ahrs_data.sensor_accel[1] = linearAccel.axis.y * GRAVITY_AMOUNT;
-  ahrs_data.sensor_accel[2] = linearAccel.axis.z * GRAVITY_AMOUNT;
+  // Apply bias correction in sensor frame
+  float sensor_ax = raw_linear_ax;
+  float sensor_ay = raw_linear_ay;
+  float sensor_az = raw_linear_az;
 
-  // Corrected gyro (in rad/s)
+  if (bias_initialized)
+  {
+    sensor_ax -= accel_bias[0];
+    sensor_ay -= accel_bias[1];
+    sensor_az -= accel_bias[2];
+  }
+
+  ahrs_data.sensor_accel[0] = sensor_ax;
+  ahrs_data.sensor_accel[1] = sensor_ay;
+  ahrs_data.sensor_accel[2] = sensor_az;
+
+  // Earth frame acceleration: Use Fusion's earthAccel and apply bias correction
+  // Fusion already rotates linear acceleration to earth frame, so we use it directly
+  // But we need to apply bias correction in earth frame
+  float earth_ax = earthAccel.axis.x * GRAVITY_AMOUNT;
+  float earth_ay = earthAccel.axis.y * GRAVITY_AMOUNT;
+  float earth_az = earthAccel.axis.z * GRAVITY_AMOUNT;
+
+  // Transform bias from sensor to earth frame and subtract
+  if (bias_initialized)
+  {
+    float qw = fusionQuat.element.w;
+    float qx = fusionQuat.element.x;
+    float qy = fusionQuat.element.y;
+    float qz = fusionQuat.element.z;
+
+    // Use FusionMatrix for rotation (same formula as FusionQuaternionToMatrix)
+    float bx = accel_bias[0];
+    float by = accel_bias[1];
+    float bz = accel_bias[2];
+
+    // Rotation matrix from sensor to earth frame
+    // Same as FusionQuaternionToMatrix
+    float r00 = 1.0f - 2.0f * (qy * qy + qz * qz);
+    float r01 = 2.0f * (qx * qy - qw * qz);
+    float r02 = 2.0f * (qx * qz + qw * qy);
+    float r10 = 2.0f * (qx * qy + qw * qz);
+    float r11 = 1.0f - 2.0f * (qx * qx + qz * qz);
+    float r12 = 2.0f * (qy * qz - qw * qx);
+    float r20 = 2.0f * (qx * qz - qw * qy);
+    float r21 = 2.0f * (qy * qz + qw * qx);
+    float r22 = 1.0f - 2.0f * (qx * qx + qy * qy);
+
+    // Transform bias to earth frame
+    float bias_earth_x = r00 * bx + r01 * by + r02 * bz;
+    float bias_earth_y = r10 * bx + r11 * by + r12 * bz;
+    float bias_earth_z = r20 * bx + r21 * by + r22 * bz;
+
+    earth_ax -= bias_earth_x;
+    earth_ay -= bias_earth_y;
+    earth_az -= bias_earth_z;
+  }
+
+  ahrs_data.earth_accel[0] = earth_ax;
+  ahrs_data.earth_accel[1] = earth_ay;
+  ahrs_data.earth_accel[2] = earth_az;
+
+  // Corrected gyro (in rad/s) - after FusionOffset
   ahrs_data.gyro_corrected[0] = gyroscope.axis.x * (float)M_PI / 180.0f;
   ahrs_data.gyro_corrected[1] = gyroscope.axis.y * (float)M_PI / 180.0f;
   ahrs_data.gyro_corrected[2] = gyroscope.axis.z * (float)M_PI / 180.0f;
 
+  // Filtered gyro (in rad/s) - before FusionOffset, for ZUPT detection
+  // This matches the old implementation which used raw filtered gyro for ZUPT
+  ahrs_data.gyro_filtered[0] = filtered->gx;
+  ahrs_data.gyro_filtered[1] = filtered->gy;
+  ahrs_data.gyro_filtered[2] = filtered->gz;
+
   ahrs_data.dt = filtered->dt;
+  ahrs_data.temp = filtered->temp;
 
   // Send to MainCore (which will forward to SubCore3)
   MP.Send(MSG_ID_AHRS, &ahrs_data, 0); // 0 = MainCore

@@ -72,6 +72,7 @@ typedef struct
 typedef struct
 {
   uint32_t timestamp;
+  float temp;
   float ax; // m/s^2 (filtered)
   float ay;
   float az;
@@ -87,11 +88,14 @@ typedef struct
 typedef struct
 {
   uint32_t timestamp;
-  float quaternion[4];     // [w, x, y, z]
-  float earth_accel[3];    // [x, y, z] m/s^2 (gravity removed, earth frame)
-  float sensor_accel[3];   // [x, y, z] m/s^2 (gravity removed, sensor frame)
-  float gyro_corrected[3]; // [x, y, z] rad/s (bias corrected)
+  float quaternion[4];       // [w, x, y, z]
+  float earth_accel[3];      // [x, y, z] m/s^2 (gravity removed, earth frame, bias corrected)
+  float sensor_accel[3];     // [x, y, z] m/s^2 (gravity removed, sensor frame, bias corrected)
+  float linear_accel_raw[3]; // [x, y, z] m/s^2 (raw LinearAccel from AHRS, NOT bias corrected)
+  float gyro_corrected[3];   // [x, y, z] rad/s (bias corrected by FusionOffset)
+  float gyro_filtered[3];    // [x, y, z] rad/s (filtered but NOT bias corrected, for ZUPT)
   float dt;
+  float temp;
 } AhrsData_t;
 
 /**
@@ -102,10 +106,15 @@ typedef struct
   uint32_t timestamp;
   float quaternion[4];
   float earth_accel[3];
+  float sensor_accel[3];       // Sensor frame acceleration (bias corrected) for integration
+  float linear_accel_raw[3];   // Raw LinearAcceleration from AHRS (NOT bias corrected) for bias learning
+  float gyro_corrected[3];     // Corrected gyro data (rad/s) - for output
+  float gyro_filtered[3];      // Filtered gyro (rad/s) - NOT bias corrected, for ZUPT
   float gyro_magnitude;
   float accel_magnitude;
   bool is_stationary; // ZUPT判定結果
   float dt;
+  float temp;
 } ZuptData_t;
 
 /**

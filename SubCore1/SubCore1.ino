@@ -152,6 +152,7 @@ void loop()
   // Apply Gaussian filter
   static ImuFilteredData_t filtered_data;
   filtered_data.timestamp = raw_data->timestamp;
+  filtered_data.temp = raw_data->temp;
   filtered_data.ax = applyCausalGaussianFilter(measured_accel_x, current_list_num);
   filtered_data.ay = applyCausalGaussianFilter(measured_accel_y, current_list_num);
   filtered_data.az = applyCausalGaussianFilter(measured_accel_z, current_list_num);

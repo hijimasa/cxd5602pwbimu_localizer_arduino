@@ -13,26 +13,34 @@
 #include <MP.h>
 #include "shared_types.h"
 
-// ZUPT detection parameters
-#define ACCEL_THRESHOLD 0.08f                        // m/s^2 (increased for 1920Hz)
-#define GYRO_THRESHOLD 0.008f                        // rad/s (~0.46 deg/s, increased for 1920Hz)
-#define REQUIRED_SAMPLES (MESUREMENT_FREQUENCY / 10) // 0.1 second
-#define MOTION_WINDOW_SIZE 8                         // Moving average for noise reduction
+// ZUPT detection parameters - tuned for reliable stationary detection
+// Key insight: use VARIANCE (not absolute value) to detect stationary state
+// A stationary sensor has low variance even with bias offset
+#define ACCEL_VARIANCE_THRESHOLD 0.004f              // (m/s^2)^2 - variance threshold for accel
+#define GYRO_VARIANCE_THRESHOLD 0.00006f             // (rad/s)^2 - variance threshold for gyro
+#define REQUIRED_SAMPLES (MESUREMENT_FREQUENCY / 20) // 0.05 second = 96 samples at 1920Hz
+#define MOTION_WINDOW_SIZE 16                        // Window for variance calculation
 
 // Bias learning parameters
-#define BIAS_LEARNING_RATE (0.01f / (MESUREMENT_FREQUENCY / 1920.0f))
+// Old implementation used alpha = 0.01 at 240Hz
+// Scale to maintain equivalent convergence at higher sample rate
+#define BIAS_LEARNING_RATE (0.001f)
 
 // State variables
 static int zero_velocity_counter = 0;
 static float accel_bias[3] = {0.0f, 0.0f, 0.0f};
 static bool bias_initialized = false;
-static int bias_update_counter = 0;
 static bool init_complete = false; // Wait for initialization from MainCore
 
-// Moving average for motion detection
-static float accel_mag_buffer[MOTION_WINDOW_SIZE] = {0};
-static float gyro_mag_buffer[MOTION_WINDOW_SIZE] = {0};
+// Buffers for variance calculation (store raw values, not magnitudes)
+static float accel_x_buffer[MOTION_WINDOW_SIZE];
+static float accel_y_buffer[MOTION_WINDOW_SIZE];
+static float accel_z_buffer[MOTION_WINDOW_SIZE];
+static float gyro_x_buffer[MOTION_WINDOW_SIZE];
+static float gyro_y_buffer[MOTION_WINDOW_SIZE];
+static float gyro_z_buffer[MOTION_WINDOW_SIZE];
 static int motion_buffer_idx = 0;
+static bool buffer_filled = false;
 
 // Statistics tracking
 static uint32_t loop_count = 0;
@@ -41,26 +49,63 @@ static uint32_t stats_loop_count_start = 0;
 static uint32_t recv_error_count = 0;
 static uint32_t wrong_msgid_count = 0;
 
-bool detectStationary(float accel_magnitude, float gyro_magnitude)
+// Calculate variance of a buffer
+static float calculateVariance(const float *buffer, int size)
 {
-  // Update moving average buffers
-  accel_mag_buffer[motion_buffer_idx] = accel_magnitude;
-  gyro_mag_buffer[motion_buffer_idx] = gyro_magnitude;
-  motion_buffer_idx = (motion_buffer_idx + 1) % MOTION_WINDOW_SIZE;
-
-  // Calculate smoothed magnitudes
-  float smoothed_accel = 0.0f;
-  float smoothed_gyro = 0.0f;
-  for (int i = 0; i < MOTION_WINDOW_SIZE; i++)
+  // Calculate mean
+  float mean = 0.0f;
+  for (int i = 0; i < size; i++)
   {
-    smoothed_accel += accel_mag_buffer[i];
-    smoothed_gyro += gyro_mag_buffer[i];
+    mean += buffer[i];
   }
-  smoothed_accel /= MOTION_WINDOW_SIZE;
-  smoothed_gyro /= MOTION_WINDOW_SIZE;
+  mean /= size;
 
-  // Check against thresholds using smoothed values
-  if (smoothed_accel < ACCEL_THRESHOLD && smoothed_gyro < GYRO_THRESHOLD)
+  // Calculate variance
+  float variance = 0.0f;
+  for (int i = 0; i < size; i++)
+  {
+    float diff = buffer[i] - mean;
+    variance += diff * diff;
+  }
+  return variance / size;
+}
+
+bool detectStationary(float ax, float ay, float az, float gx, float gy, float gz)
+{
+  // Update buffers with raw values
+  accel_x_buffer[motion_buffer_idx] = ax;
+  accel_y_buffer[motion_buffer_idx] = ay;
+  accel_z_buffer[motion_buffer_idx] = az;
+  gyro_x_buffer[motion_buffer_idx] = gx;
+  gyro_y_buffer[motion_buffer_idx] = gy;
+  gyro_z_buffer[motion_buffer_idx] = gz;
+
+  motion_buffer_idx = (motion_buffer_idx + 1) % MOTION_WINDOW_SIZE;
+  if (motion_buffer_idx == 0)
+  {
+    buffer_filled = true;
+  }
+
+  // Need full buffer for accurate variance
+  if (!buffer_filled)
+  {
+    return false;
+  }
+
+  // Calculate variance for each axis
+  float accel_var_x = calculateVariance(accel_x_buffer, MOTION_WINDOW_SIZE);
+  float accel_var_y = calculateVariance(accel_y_buffer, MOTION_WINDOW_SIZE);
+  float accel_var_z = calculateVariance(accel_z_buffer, MOTION_WINDOW_SIZE);
+  float gyro_var_x = calculateVariance(gyro_x_buffer, MOTION_WINDOW_SIZE);
+  float gyro_var_y = calculateVariance(gyro_y_buffer, MOTION_WINDOW_SIZE);
+  float gyro_var_z = calculateVariance(gyro_z_buffer, MOTION_WINDOW_SIZE);
+
+  // Total variance (sum of all axes)
+  float total_accel_var = accel_var_x + accel_var_y + accel_var_z;
+  float total_gyro_var = gyro_var_x + gyro_var_y + gyro_var_z;
+
+  // Check if variance is below threshold (stationary = low variance)
+  if (total_accel_var < ACCEL_VARIANCE_THRESHOLD && total_gyro_var < GYRO_VARIANCE_THRESHOLD)
   {
     zero_velocity_counter++;
   }
@@ -81,10 +126,7 @@ void updateBias(float sensor_ax, float sensor_ay, float sensor_az)
   accel_bias[1] += BIAS_LEARNING_RATE * sensor_ay;
   accel_bias[2] += BIAS_LEARNING_RATE * sensor_az;
 
-  // Periodically send updated bias to SubCore2
-  bias_update_counter++;
-  if (bias_update_counter >= MESUREMENT_FREQUENCY)
-  { // Every 1 second
+  {
     static BiasData_t bias_data;
     bias_data.accel_bias[0] = accel_bias[0];
     bias_data.accel_bias[1] = accel_bias[1];
@@ -93,7 +135,6 @@ void updateBias(float sensor_ax, float sensor_ay, float sensor_az)
     bias_data.sample_count = 0;
 
     MP.Send(MSG_ID_BIAS_DATA, &bias_data, 0); // 0 = MainCore (will forward)
-    bias_update_counter = 0;
   }
 }
 
@@ -102,11 +143,15 @@ void setup()
   // Initialize MP library
   MP.begin();
 
-  // Initialize motion detection buffers
+  // Initialize variance calculation buffers
   for (int i = 0; i < MOTION_WINDOW_SIZE; i++)
   {
-    accel_mag_buffer[i] = 0.0f;
-    gyro_mag_buffer[i] = 0.0f;
+    accel_x_buffer[i] = 0.0f;
+    accel_y_buffer[i] = 0.0f;
+    accel_z_buffer[i] = 0.0f;
+    gyro_x_buffer[i] = 0.0f;
+    gyro_y_buffer[i] = 0.0f;
+    gyro_z_buffer[i] = 0.0f;
   }
 
   // Set receive timeout to blocking mode
@@ -163,22 +208,24 @@ void loop()
 
   AhrsData_t *ahrs = (AhrsData_t *)msgdata;
 
-  // Calculate magnitudes for ZUPT detection
+  // Calculate magnitudes for output (still needed for SubCore4 decay calculation)
   float accel_magnitude = sqrt(
       ahrs->earth_accel[0] * ahrs->earth_accel[0] +
       ahrs->earth_accel[1] * ahrs->earth_accel[1] +
       ahrs->earth_accel[2] * ahrs->earth_accel[2]);
 
   float gyro_magnitude = sqrt(
-      ahrs->gyro_corrected[0] * ahrs->gyro_corrected[0] +
-      ahrs->gyro_corrected[1] * ahrs->gyro_corrected[1] +
-      ahrs->gyro_corrected[2] * ahrs->gyro_corrected[2]);
+      ahrs->gyro_filtered[0] * ahrs->gyro_filtered[0] +
+      ahrs->gyro_filtered[1] * ahrs->gyro_filtered[1] +
+      ahrs->gyro_filtered[2] * ahrs->gyro_filtered[2]);
 
-  // ZUPT detection
-  bool is_stationary = detectStationary(accel_magnitude, gyro_magnitude);
+  // ZUPT detection using variance-based method
+  // Pass raw values for variance calculation
+  bool is_stationary = detectStationary(
+      ahrs->earth_accel[0], ahrs->earth_accel[1], ahrs->earth_accel[2],
+      ahrs->gyro_filtered[0], ahrs->gyro_filtered[1], ahrs->gyro_filtered[2]);
 
-  // Update bias during stationary periods
-  if (is_stationary && bias_initialized)
+  if (is_stationary)
   {
     updateBias(ahrs->sensor_accel[0], ahrs->sensor_accel[1], ahrs->sensor_accel[2]);
   }
@@ -193,10 +240,23 @@ void loop()
   zupt_data.earth_accel[0] = ahrs->earth_accel[0];
   zupt_data.earth_accel[1] = ahrs->earth_accel[1];
   zupt_data.earth_accel[2] = ahrs->earth_accel[2];
+  zupt_data.sensor_accel[0] = ahrs->sensor_accel[0];
+  zupt_data.sensor_accel[1] = ahrs->sensor_accel[1];
+  zupt_data.sensor_accel[2] = ahrs->sensor_accel[2];
+  zupt_data.linear_accel_raw[0] = ahrs->linear_accel_raw[0];
+  zupt_data.linear_accel_raw[1] = ahrs->linear_accel_raw[1];
+  zupt_data.linear_accel_raw[2] = ahrs->linear_accel_raw[2];
+  zupt_data.gyro_corrected[0] = ahrs->gyro_corrected[0];
+  zupt_data.gyro_corrected[1] = ahrs->gyro_corrected[1];
+  zupt_data.gyro_corrected[2] = ahrs->gyro_corrected[2];
+  zupt_data.gyro_filtered[0] = ahrs->gyro_filtered[0];
+  zupt_data.gyro_filtered[1] = ahrs->gyro_filtered[1];
+  zupt_data.gyro_filtered[2] = ahrs->gyro_filtered[2];
   zupt_data.gyro_magnitude = gyro_magnitude;
   zupt_data.accel_magnitude = accel_magnitude;
   zupt_data.is_stationary = is_stationary;
   zupt_data.dt = ahrs->dt;
+  zupt_data.temp = ahrs->temp;
 
   // Send to MainCore (which will forward to SubCore4)
   MP.Send(MSG_ID_ZUPT, &zupt_data, 0); // 0 = MainCore
