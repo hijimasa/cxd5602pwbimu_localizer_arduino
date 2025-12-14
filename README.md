@@ -2,40 +2,51 @@
 
 English | [日本語](./README_jp.md)
 
-This repository contains an Arduino IDE project for the Spresense board that uses the onboard IMU (Inertial Measurement Unit) to perform sensor-based self-localization. The project demonstrates sensor fusion techniques using the **Fusion library**, including calibration, filtering, and orientation estimation, to estimate acceleration, velocity, and position.
+This repository contains an Arduino IDE project for the Spresense board that uses the onboard IMU (Inertial Measurement Unit) to perform sensor-based self-localization. The project leverages the **Spresense multicore architecture** (6 cores) for high-performance parallel processing, implementing sensor fusion techniques using the **Fusion library** for calibration, filtering, and orientation estimation.
 
 ## Overview
 
-The code reads raw IMU data (acceleration, rotation speed, and temperature) from the Spresense sensor and processes it through several steps:
+The system reads raw IMU data (acceleration, rotation speed, and temperature) at 1920Hz and processes it through a multicore pipeline:
 
-- **Calibration & Initialization:** The IMU sensor data is averaged over a predefined measurement period to determine the initial bias and orientation.
-- **Filtering:** A causal Gaussian filter is applied to smooth the sensor readings.
-- **Orientation Estimation:** The program uses the **Fusion AHRS (Attitude and Heading Reference System)** library to fuse accelerometer and gyroscope data, providing robust quaternion-based orientation estimation with intelligent accelerometer rejection during motion.
-- **Gyroscope Bias Compensation:** Runtime gyroscope offset correction is performed using the Fusion library's FusionOffset algorithm.
-- **Acceleration Bias Correction:** An adaptive bias correction mechanism continuously updates acceleration bias during stationary periods.
-- **Zero Velocity Update (ZUPT):** A zero-velocity update is implemented to reset drift when the sensor readings indicate near-zero movement, based on acceleration and gyroscope magnitude thresholds.
-- **Position Estimation:** Velocity and position are updated using trapezoidal integration based on the corrected acceleration values.
+- **MainCore:** IMU data acquisition, initial calibration, and data distribution
+- **SubCore1:** Gaussian filtering for noise reduction
+- **SubCore2:** AHRS (Attitude and Heading Reference System) using Fusion library
+- **SubCore3:** Zero Velocity Update (ZUPT) detection and bias estimation
+- **SubCore4:** Velocity and position integration
+
+## Architecture
+
+```
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│  MainCore   │───▶│  SubCore1   │───▶│  SubCore2   │───▶│  SubCore3   │───▶│  SubCore4   │
+│  IMU Read   │    │  Gaussian   │    │  Fusion     │    │    ZUPT     │    │  Position   │
+│  1920Hz     │    │   Filter    │    │    AHRS     │    │    Bias     │    │ Integration │
+└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘    └──────┬──────┘
+                                                                                    │
+                                                                                    ▼
+                                                                           Serial Output (30Hz)
+```
 
 ## Features
 
-- **IMU Data Acquisition:** Reads acceleration, gyroscope, and temperature data from the Spresense IMU.
-- **Fusion AHRS Integration:** Utilizes the Fusion library for robust sensor fusion with accelerometer rejection and automatic gravity removal.
-- **Quaternion-Based Orientation:** Provides smooth orientation updates using the Fusion AHRS algorithm.
-- **Gaussian Filtering:** Uses a causal Gaussian filter to reduce high-frequency noise in sensor data.
-- **Adaptive Bias Correction:** Continuously updates acceleration bias during stationary periods to compensate for temperature drift.
-- **Zero-Velocity Update:** Applies ZUPT correction when the device is detected to be stationary, preventing velocity drift accumulation.
-- **Trapezoidal Integration:** Uses trapezoidal method for velocity and position updates, improving accuracy over simple Euler integration.
-- **Real-Time Data Output:** Logs key computed values (timestamp, sensor data, estimated acceleration, orientation, velocity, and position) via the Serial interface.
+- **High-Speed IMU Data Acquisition:** 1920Hz sampling rate utilizing full IMU performance
+- **Multicore Parallel Processing:** Distributes computation across 5 cores for real-time processing
+- **Fusion AHRS Integration:** Robust sensor fusion with accelerometer rejection and automatic gravity removal
+- **Gaussian Filtering:** Causal Gaussian filter for noise reduction
+- **Variance-Based ZUPT Detection:** Detects stationary state using signal variance instead of absolute thresholds, enabling accurate detection even with sensor bias
+- **Adaptive Bias Correction:** Continuously updates acceleration bias during stationary periods
+- **Trapezoidal Integration:** Improved accuracy for velocity and position estimation
 
 ## Hardware Requirements
 
-- **Sony Spresense Board:** Ensure your board includes the onboard IMU.
-- **IMU Sensor:** The project uses the built-in CXD5602PWBIMU sensor.
+- **Sony Spresense Main Board** with CXD5602 processor
+- **Spresense IMU Add-on Board** (CXD5602PWBIMU)
 
 ## Software Requirements
 
-- **Arduino IDE:** Compatible with the Spresense Arduino libraries.
-- **Spresense SDK:** Required to compile and flash the firmware onto the board.
+- **Arduino IDE** (1.8.x or 2.x)
+- **Spresense Arduino Board Package** (3.0.0 or later)
+- **Spresense SDK** (for board support)
 
 ## Getting Started
 
@@ -49,64 +60,150 @@ The code reads raw IMU data (acceleration, rotation speed, and temperature) from
    git submodule update --init
    ```
 
-2. **Open in Arduino IDE:**
+2. **Install Spresense Arduino Board Package:**
 
-   Open the project in the Arduino IDE. Make sure the Spresense board and related libraries are installed.
+   - Open Arduino IDE
+   - Go to **File** > **Preferences**
+   - Add the following URL to "Additional Board Manager URLs":
+     ```
+     https://github.com/sonydevworld/spresense-arduino-compatible/releases/download/generic/package_spresense_index.json
+     ```
+   - Go to **Tools** > **Board** > **Board Manager**
+   - Search for "Spresense" and install the package
 
-3. **Compile & Upload:**
+### Building and Uploading (Multicore)
 
-   Build and upload the code to your Spresense board. The program automatically starts reading from the IMU once the board is running.
+Since this project uses multiple cores, you need to compile and upload each core separately in the Arduino IDE.
+
+#### Step 1: Upload SubCores First
+
+You must upload SubCores **before** uploading the MainCore.
+
+1. **SubCore1 (Gaussian Filter):**
+   - Open `SubCore1/SubCore1.ino` in Arduino IDE
+   - Go to **Tools** > **Core** > Select **"SubCore 1"**
+   - Click **Upload** (or Ctrl+U)
+
+2. **SubCore2 (AHRS):**
+   - Open `SubCore2/SubCore2.ino` in Arduino IDE
+   - Go to **Tools** > **Core** > Select **"SubCore 2"**
+   - Click **Upload**
+
+3. **SubCore3 (ZUPT):**
+   - Open `SubCore3/SubCore3.ino` in Arduino IDE
+   - Go to **Tools** > **Core** > Select **"SubCore 3"**
+   - Click **Upload**
+
+4. **SubCore4 (Position Integration):**
+   - Open `SubCore4/SubCore4.ino` in Arduino IDE
+   - Go to **Tools** > **Core** > Select **"SubCore 4"**
+   - Click **Upload**
+
+#### Step 2: Upload MainCore Last
+
+1. Open `cxd5602pwbimu_localizer_arduino.ino` in Arduino IDE
+2. Go to **Tools** > **Core** > Select **"MainCore"**
+3. Click **Upload**
 
 ### Running the Application
 
-- Once uploaded, open the Serial Monitor (set at 115200 baud) to view the output.
-- The code prints formatted sensor data at regular intervals, including the current orientation (as a quaternion), velocity, and position estimates.
+1. After uploading all cores, open the Serial Monitor
+2. Set baud rate to **115200**
+3. The system will perform automatic calibration:
+   - **5 seconds:** Initial orientation calibration (keep the sensor stationary)
+   - **10 seconds:** Acceleration bias learning (keep the sensor stationary)
+4. After calibration, the system outputs position data at 30Hz
 
-## Code Structure and Algorithm Details
+### Output Format
+
+The serial output contains comma-separated values:
+```
+timestamp, qw, qx, qy, qz, vx, vy, vz, px, py, pz, ax, ay, az, gx, gy, gz, temp, is_stationary
+```
+
+## Project Structure
+
+```
+cxd5602pwbimu_localizer_arduino/
+├── cxd5602pwbimu_localizer_arduino.ino  # MainCore: IMU acquisition & calibration
+├── shared_types.h                        # Shared data structures for inter-core communication
+├── SubCore1/
+│   └── SubCore1.ino                      # Gaussian filter processing
+├── SubCore2/
+│   ├── SubCore2.ino                      # Fusion AHRS processing
+│   └── src/Fusion/                       # Fusion library
+├── SubCore3/
+│   └── SubCore3.ino                      # ZUPT detection & bias estimation
+├── SubCore4/
+│   └── SubCore4.ino                      # Velocity & position integration
+├── SubCore5/
+│   └── SubCore5.ino                      # (Reserved for future use)
+└── src/Fusion/                           # Fusion library for MainCore
+```
+
+## Algorithm Details
 
 ### Initialization and Calibration
 
-- **Initialization Function (`imu_data_initialize`):**
-  Averages a number of samples (defined by `MESUREMENT_FREQUENCY`) to calibrate the accelerometer and gyroscope readings. It also computes the initial quaternion based on gravity and earth rotation.
+1. **Orientation Calibration (5 seconds):**
+   - Averages accelerometer and gyroscope readings
+   - Calculates initial quaternion from gravity and Earth rotation vectors
 
-- **Acceleration Bias Learning (`initialize_acceleration_bias`):**
-  During the setup phase, the system collects 5 seconds of IMU data (9600 samples) to learn the initial acceleration bias using the Fusion AHRS library. This helps compensate for sensor manufacturing variations and temperature-dependent offsets.
+2. **Acceleration Bias Learning (10 seconds):**
+   - Uses Fusion AHRS to compute gravity-removed acceleration
+   - Learns sensor bias by comparing measured vs. expected gravity vector
 
-### Data Processing
+### Data Processing Pipeline
 
-- **Gaussian Filtering:**
-  A causal Gaussian filter smooths both the acceleration and rotation speed data using a precomputed kernel with sigma = LIST_SIZE/8.0.
+1. **Gaussian Filter (SubCore1):**
+   - Causal Gaussian filter with σ = LIST_SIZE/8.0
+   - Reduces high-frequency noise while preserving signal dynamics
 
-- **Fusion AHRS Algorithm:**
-  The Fusion library provides a comprehensive AHRS solution that handles:
-  - Quaternion update with gyroscope integration
-  - Accelerometer correction with intelligent rejection during motion (threshold: 10 degrees)
-  - Automatic gravity vector tracking and removal
-  - Coordinate frame transformations (North-West-Up convention)
-  - Recovery mechanism after sensor saturation (5-second trigger period)
+2. **AHRS Processing (SubCore2):**
+   - Fusion library provides quaternion-based orientation estimation
+   - Accelerometer rejection during dynamic motion (threshold: 10°)
+   - Automatic gravity removal in Earth frame
+   - Bias correction applied in sensor frame before coordinate transformation
 
-- **Gyroscope Offset Correction:**
-  The `FusionOffset` algorithm continuously estimates and corrects gyroscope bias during runtime.
+3. **ZUPT Detection (SubCore3):**
+   - **Variance-based detection:** Uses signal variance instead of absolute magnitude
+   - Thresholds: Accel variance < 0.004 (m/s²)², Gyro variance < 0.00006 (rad/s)²
+   - Window size: 16 samples with 96-sample (0.05s) confirmation period
+   - Advantage: Works correctly even with sensor bias offset
 
-- **Adaptive Acceleration Bias Update:**
-  During stationary periods (detected by ZUPT), the acceleration bias is continuously updated using exponential moving average (learning rate: 0.1%) to compensate for temperature drift.
+4. **Position Integration (SubCore4):**
+   - Trapezoidal integration for velocity and position
+   - ZUPT correction resets velocity to zero during stationary periods
 
-- **Zero-Velocity Update (ZUPT):**
-  The improved ZUPT algorithm detects stationary state based on:
-  - Acceleration magnitude threshold: < 0.15 m/s²
-  - Gyroscope magnitude threshold: < 0.015 rad/s (≈ 0.86°/s)
-  - Duration requirement: 0.1 seconds (192 samples)
+## Configuration
 
-  When stationary state is detected, velocity is reset to zero and acceleration bias is updated.
+Key parameters in `shared_types.h`:
 
-### Integration for Velocity and Position
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `MESUREMENT_FREQUENCY` | 1920 Hz | IMU sampling rate |
+| `GRAVITY_AMOUNT` | 9.7975 m/s² | Local gravity (Tokyo, Japan) |
+| `FUSION_AHRS_GAIN` | 0.1 | AHRS filter gain |
+| `FUSION_ACCEL_REJECTION` | 10.0° | Accelerometer rejection threshold |
 
-- **Velocity & Position Updates:**
-  After compensating for gravity and bias, the acceleration is integrated over time using the **trapezoidal method** to update the velocity and then the position. This provides better accuracy compared to simple Euler integration.
+## Troubleshooting
+
+### Common Issues
+
+1. **SubCore fails to start:**
+   - Ensure all SubCores are uploaded
+
+2. **Position drift during stationary:**
+   - Keep the sensor completely still during initial calibration
+   - The variance-based ZUPT should handle residual bias
+
+3. **Compilation errors:**
+   - Ensure Spresense board package is properly installed
+   - Check that the correct core is selected in Tools menu
 
 ## Contributing
 
-Contributions are welcome! Please fork the repository and submit your pull requests. For major changes, please open an issue first to discuss what you would like to change.
+Contributions are welcome! Please fork the repository and submit pull requests. For major changes, please open an issue first to discuss what you would like to change.
 
 ## License
 
@@ -114,4 +211,4 @@ Distributed under the MIT License. See `LICENSE` for more information.
 
 ---
 
-This README provides an overview of the project and explains the main processing steps implemented in the code. For further details or questions, please feel free to open an issue or contact the repository maintainer.
+For questions or issues, please open a GitHub issue or contact the repository maintainer.
