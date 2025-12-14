@@ -16,15 +16,13 @@
 // ZUPT detection parameters - tuned for reliable stationary detection
 // Key insight: use VARIANCE (not absolute value) to detect stationary state
 // A stationary sensor has low variance even with bias offset
-#define ACCEL_VARIANCE_THRESHOLD 0.004f              // (m/s^2)^2 - variance threshold for accel
-#define GYRO_VARIANCE_THRESHOLD 0.00006f             // (rad/s)^2 - variance threshold for gyro
+#define ACCEL_VARIANCE_THRESHOLD 0.004f              // (m/s^2)^2 - variance threshold for accel (ACCEL_NOISE_AMOUNT*10)^2
+#define GYRO_VARIANCE_THRESHOLD 0.00006f             // (rad/s)^2 - variance threshold for gyro (GYRO_NOISE_AMOUNT*10)^2
 #define REQUIRED_SAMPLES (MESUREMENT_FREQUENCY / 20) // 0.05 second = 96 samples at 1920Hz
 #define MOTION_WINDOW_SIZE 16                        // Window for variance calculation
 
 // Bias learning parameters
-// Old implementation used alpha = 0.01 at 240Hz
-// Scale to maintain equivalent convergence at higher sample rate
-#define BIAS_LEARNING_RATE (0.001f)
+#define BIAS_LEARNING_RATE (1.0f / MESUREMENT_FREQUENCY)
 
 // State variables
 static int zero_velocity_counter = 0;
