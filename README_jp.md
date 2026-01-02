@@ -186,6 +186,35 @@ cxd5602pwbimu_localizer_arduino/
 | `FUSION_AHRS_GAIN` | 0.1 | AHRSフィルタゲイン |
 | `FUSION_ACCEL_REJECTION` | 10.0° | 加速度計拒否閾値 |
 
+## 可視化
+
+### ROS 2連携
+
+リアルタイムの可視化とROSエコシステムとの統合には、ROS 2パッケージをご利用ください：
+
+**[cxd5602pwbimu_localizer_node](https://github.com/hijimasa/cxd5602pwbimu_localizer_node)**
+
+このROS 2ノードは、本Arduinoプロジェクトのシリアル出力を読み取り、標準ROSメッセージに変換します：
+- `sensor_msgs/Imu` - IMUデータ（角速度、線形加速度、姿勢）
+- `geometry_msgs/Pose` - 位置と姿勢
+- RViz可視化用TF変換
+
+#### クイックスタート
+
+```bash
+# ROS 2パッケージのインストール
+cd ~/ros2_ws/src
+git clone https://github.com/hijimasa/cxd5602pwbimu_localizer_node.git
+cd ~/ros2_ws
+colcon build --packages-select cxd5602pwbimu_localizer_node
+source install/setup.bash
+
+# ノードの実行
+ros2 run cxd5602pwbimu_localizer_node localizer_node --ros-args -p serial_port:=/dev/ttyUSB0
+```
+
+RVizでTFとPoseディスプレイを追加することで、センサデータを可視化できます。
+
 ## トラブルシューティング
 
 ### よくある問題

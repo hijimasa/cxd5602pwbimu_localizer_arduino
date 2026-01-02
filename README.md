@@ -186,6 +186,35 @@ Key parameters in `shared_types.h`:
 | `FUSION_AHRS_GAIN` | 0.1 | AHRS filter gain |
 | `FUSION_ACCEL_REJECTION` | 10.0° | Accelerometer rejection threshold |
 
+## Visualization
+
+### ROS 2 Integration
+
+For real-time visualization and integration with the ROS ecosystem, use the ROS 2 package:
+
+**[cxd5602pwbimu_localizer_node](https://github.com/hijimasa/cxd5602pwbimu_localizer_node)**
+
+This ROS 2 node reads the serial output from this Arduino project and converts it to standard ROS messages:
+- `sensor_msgs/Imu` - IMU data (angular velocity, linear acceleration, orientation)
+- `geometry_msgs/Pose` - Position and orientation
+- TF transforms for RViz visualization
+
+#### Quick Start
+
+```bash
+# Install the ROS 2 package
+cd ~/ros2_ws/src
+git clone https://github.com/hijimasa/cxd5602pwbimu_localizer_node.git
+cd ~/ros2_ws
+colcon build --packages-select cxd5602pwbimu_localizer_node
+source install/setup.bash
+
+# Run the node
+ros2 run cxd5602pwbimu_localizer_node localizer_node --ros-args -p serial_port:=/dev/ttyUSB0
+```
+
+You can then visualize the sensor data in RViz by adding TF and Pose displays.
+
 ## Troubleshooting
 
 ### Common Issues
