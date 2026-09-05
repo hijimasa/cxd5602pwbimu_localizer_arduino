@@ -238,7 +238,7 @@ void Localizer::processRunning(const ImuSample &sample)
   }
 
   // 8. Velocity / position integration
-  integrator_.update(earthAccel, dt, stationary);
+  integrator_.update(earthAccel, dt, stationary, zupt_.stillSamples() * LOCALIZER_NOMINAL_DT);
 
   state_.timestamp = sample.timestamp;
   state_.quaternion = q;

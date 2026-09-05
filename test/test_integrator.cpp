@@ -128,6 +128,36 @@ TEST(integrator_retroactive_correction_keeps_true_displacement)
   CHECK_NEAR(before, 1.0f, 5e-3); // 0.5*1*1^2 + (1*1 - 0.5*1*1^2)
 }
 
+TEST(integrator_correction_accounts_for_confirmation_delay)
+{
+  // 2 s of "motion" with a constant 0.05 m/s^2 error, then the sensor is
+  // still for 1 s (error velocity constant, no acceleration) before the
+  // ZUPT is confirmed. The correction must remove both parts exactly.
+  VelocityIntegrator integ;
+  integ.setCorrectionBlendTime(0.0f);
+  const float dt = LOCALIZER_NOMINAL_DT;
+  integ.update(vec3Zero(), dt, true);
+  const int N = 2 * LOCALIZER_SAMPLE_RATE;
+  for (int i = 0; i < N; i++) integ.update(vec3(0.05f, 0.0f, 0.0f), dt, false);
+  const int M = LOCALIZER_SAMPLE_RATE; // still, not yet confirmed
+  for (int i = 0; i < M; i++) integ.update(vec3Zero(), dt, false);
+  const float vErr = integ.velocity().x;
+  CHECK_NEAR(vErr, 0.05f * N * dt, 1e-3);
+  const float posErr = integ.position().x; // ~ 0.5*a*T^2 + v*1s
+  CHECK_NEAR(posErr, 0.5f * 0.05f * 4.0f + vErr * 1.0f, 3e-3);
+  integ.update(vec3Zero(), dt, true, M * dt);
+  CHECK_NEAR(integ.lastCorrection().x, -vErr * (M * dt + 0.5f * (N + 1) * dt), 1e-4);
+  CHECK_NEAR(integ.position().x, 0.0f, 3e-3);
+  // without the still time the same case leaves half of the wait uncorrected
+  VelocityIntegrator naive;
+  naive.setCorrectionBlendTime(0.0f);
+  naive.update(vec3Zero(), dt, true);
+  for (int i = 0; i < N; i++) naive.update(vec3(0.05f, 0.0f, 0.0f), dt, false);
+  for (int i = 0; i < M; i++) naive.update(vec3Zero(), dt, false);
+  naive.update(vec3Zero(), dt, true, 0.0f);
+  CHECK_NEAR(naive.position().x, 0.5f * vErr * 1.0f, 5e-3);
+}
+
 TEST(integrator_correction_is_blended_without_position_step)
 {
   VelocityIntegrator integ;

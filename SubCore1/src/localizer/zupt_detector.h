@@ -38,6 +38,8 @@ public:
   bool update(Vec3 accel, Vec3 gyro, float speed = 0.0f);
 
   bool isStationary() const { return stationary_; }
+  /** Consecutive samples for which the still condition has held (0 if moving). */
+  int stillSamples() const { return stillCounter_; }
   /** Variance condition alone (false while the window is not yet filled). */
   bool isLowVariance() const { return lowVariance_; }
   /** Mean-magnitude condition alone (false while the window is not yet filled). */

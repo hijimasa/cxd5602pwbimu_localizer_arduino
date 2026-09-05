@@ -25,7 +25,7 @@ void VelocityIntegrator::reset()
   correctionCount_ = 0;
 }
 
-void VelocityIntegrator::update(Vec3 earthAccel, float dt, bool stationary)
+void VelocityIntegrator::update(Vec3 earthAccel, float dt, bool stationary, float stillTime)
 {
   if (!initialised_)
   {
@@ -47,7 +47,11 @@ void VelocityIntegrator::update(Vec3 earthAccel, float dt, bool stationary)
       if (retroactive_ && !segmentClamped_ && segmentDuration_ > 0.0f &&
           segmentDuration_ <= ZUPT_MAX_CORRECTION_SEGMENT)
       {
-        lastCorrection_ = vec3Scale(velocity_, -0.5f * segmentDuration_);
+        float still = stillTime;
+        if (still < 0.0f) still = 0.0f;
+        if (still > segmentDuration_) still = segmentDuration_;
+        // constant error during the still wait + linear growth before it
+        lastCorrection_ = vec3Scale(velocity_, -(still + 0.5f * (segmentDuration_ - still)));
         correctionCount_++;
         if (blendTime_ > 0.0f)
         {

@@ -6,11 +6,13 @@
  *
  * Retroactive correction: when a zero-velocity update is confirmed the
  * velocity should be zero; the remaining velocity is the error accumulated
- * during the motion segment that just ended. Modelling that error as growing
- * linearly over the segment duration T, the position error is v_err * T / 2.
- * To keep the output continuous the correction is spread linearly over
- * ZUPT_CORRECTION_BLEND_TIME after the ZUPT instead of being applied as a
- * step.
+ * during the motion segment that just ended. The sensor has already been
+ * still for the confirmation time t_still, during which the velocity error
+ * was constant (position error v_err * t_still); before that, over the
+ * remaining T - t_still, the error is modelled as growing linearly
+ * (position error v_err * (T - t_still) / 2). To keep the output continuous
+ * the correction is spread linearly over ZUPT_CORRECTION_BLEND_TIME after
+ * the ZUPT instead of being applied as a step.
  */
 #ifndef VELOCITY_INTEGRATOR_H
 #define VELOCITY_INTEGRATOR_H
@@ -30,8 +32,10 @@ public:
    * @param earthAccel Earth-frame acceleration with gravity removed (m/s^2)
    * @param dt         time step (s)
    * @param stationary true to apply a zero-velocity update
+   * @param stillTime  seconds the still condition has already held when the
+   *                   ZUPT is confirmed (confirmation delay); 0 if unknown
    */
-  void update(Vec3 earthAccel, float dt, bool stationary);
+  void update(Vec3 earthAccel, float dt, bool stationary, float stillTime = 0.0f);
 
   Vec3 velocity() const { return velocity_; }
   Vec3 position() const { return position_; }

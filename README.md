@@ -156,7 +156,13 @@ cd test && make replay
 ./out/replay ../logs/desk_1m.bin --no-retro
 ```
 
-The replay prints the maximum deviation from the device's own estimate; since both run the same code it is normally 0 for the position and below 1e-5 for the quaternion.
+The replay prints the maximum deviation from the device's own estimate; since both run the same code it is normally 0 for the position and below 1e-5 for the quaternion (a device running an older firmware shows a difference).
+
+`tools/analyze_replay.py` tabulates a replay CSV into rest/motion segments with their displacements and the attitude change. The recordings in `test/data/` are also used by the regression tests (`test_recordings.cpp`), which check closure error and displacement ranges.
+
+```bash
+python3 tools/analyze_replay.py desk_1m.csv
+```
 
 The recording firmware stays silent for 2 s after boot so that the flash writer can synchronise with the boot ROM. Reading the 921600-baud stream at another baud rate can nevertheless lock up the host's USB-serial bridge (CP210x): nothing is received any more and an upload hangs in `flash_writer` waiting for the prompt. Kill `flash_writer`, run `python3 tools/usb_reset_cp210x.py` (USB-level reset, no unplugging needed) and retry the upload.
 
@@ -181,10 +187,13 @@ cxd5602pwbimu_localizer_arduino/
 │           └── localizer.*               # pipeline
 ├── test/                                 # host unit tests (make)
 │   ├── imu_simulator.h                   # synthetic IMU generator
+│   ├── raw_log.h                         # recording file parser
 │   ├── replay.cpp                        # replay device recordings (make replay)
+│   ├── data/                             # device recordings used by the regression tests
 │   └── test_*.cpp
 ├── tools/
 │   ├── record_raw.py                     # record raw device data
+│   ├── analyze_replay.py                 # segment analysis of a replay CSV
 │   └── usb_reset_cp210x.py               # recover a locked-up USB-serial bridge
 └── Fusion/                               # Fusion library (submodule)
 ```
@@ -210,7 +219,7 @@ cxd5602pwbimu_localizer_arduino/
 7b. **Gain scheduling:** confirmed stationary → 0.5; moving (high variance, or large mean acceleration/rotation) → 0.02; low variance and low mean but not yet confirmed → 0.1. A "low variance but large mean acceleration" state lasting more than 2 s is assumed to be an attitude error at rest and falls back to 0.1
 8. **Bias learning:** while stationary, the residual acceleration is learned with a 1 s time constant
 9. **Integration:** trapezoidal velocity and position; velocity is reset to zero while stationary
-10. **Retroactive ZUPT correction:** when a ZUPT is confirmed at the end of a motion segment of duration T, the remaining velocity v_err is error, and v_err × T / 2 is subtracted from the position. To keep the output continuous the correction is spread linearly over the second after the ZUPT instead of being applied as a step (a further ZUPT during that time merges its correction). Segments in which the velocity limit was hit, or longer than 60 s, are not corrected
+10. **Retroactive ZUPT correction:** when a ZUPT is confirmed at the end of a motion segment of duration T, the remaining velocity v_err is error and is removed from the position: during the confirmation delay t_still the error velocity was constant (v_err × t_still), before that it is modelled as growing linearly (v_err × (T − t_still) / 2). To keep the output continuous the correction is spread linearly over the second after the ZUPT instead of being applied as a step (a further ZUPT during that time merges its correction). Segments in which the velocity limit was hit, or longer than 60 s, are not corrected
 
 ### Current performance on synthetic data (`metric` lines of `cd test && make`)
 
@@ -221,6 +230,17 @@ cxd5602pwbimu_localizer_arduino/
 | 2 m in 3 s | 8.3 mm |
 | 1 m in 4 s (slow, peak 0.36 m/s²) | 2.0 cm |
 | 90° turn in place | 1.5 cm, attitude error 0.03° |
+
+### Results on device recordings (`test/data/`, round trips back to the start)
+
+| Test | Estimated displacement | Closure error |
+|---|---|---|
+| 30 cm on the desk and back (fast, up to 0.57 m/s) | 0.309 / 0.302 m | 4.5 mm |
+| 30 cm on the desk and back (slow, 4.5 s each way, up to 0.12 m/s) | 0.306 / 0.316 m (with correction) | 1.2 cm |
+| Lift, carry 70 cm horizontally and 45 cm down while rotating ~90°, place, carry back | 0.75 m horizontal, 0.44 m down (with correction; 0.59 m horizontal without) | 1.0 cm |
+| Stationary 60 s (level, upside down, 30° tilt) | zero position drift | attitude change 0.000° |
+
+With both the retroactive correction and the gain scheduling disabled the closure error of the carry test is 33 cm.
 
 ### Known limitations (next improvement targets)
 
