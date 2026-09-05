@@ -36,7 +36,7 @@ IMU samples cross the core boundary through a 256-entry ring buffer (about 133 m
 - **ZUPT (variance + mean):** besides the signal variance, the window mean of acceleration and angular rate is checked, so a smooth acceleration is not mistaken for rest; while the estimated speed is large the confirmation period is extended to survive short constant-velocity phases
 - **AHRS gain scheduling:** high gain while stationary for fast convergence, low gain during motion so that linear acceleration does not tilt the attitude
 - **Accelerometer bias learning** while stationary
-- **Trapezoidal integration** of velocity and position
+- **Trapezoidal integration with retroactive ZUPT correction:** the velocity left at a confirmed ZUPT is the error accumulated over the preceding motion segment; assuming linear growth it is removed from the position
 - **Host-side unit tests** with synthetic IMU regression scenarios
 
 ## Hardware Requirements
@@ -183,23 +183,25 @@ cxd5602pwbimu_localizer_arduino/
 7b. **Gain scheduling:** confirmed stationary → 0.5; moving (high variance, or large mean acceleration/rotation) → 0.02; low variance and low mean but not yet confirmed → 0.1. A "low variance but large mean acceleration" state lasting more than 2 s is assumed to be an attitude error at rest and falls back to 0.1
 8. **Bias learning:** while stationary, the residual acceleration is learned with a 1 s time constant
 9. **Integration:** trapezoidal velocity and position; velocity is reset to zero while stationary
+10. **Retroactive ZUPT correction:** when a ZUPT is confirmed at the end of a motion segment of duration T, the remaining velocity v_err is error, and v_err × T / 2 is subtracted from the position. Segments in which the velocity limit was hit, or longer than 60 s, are not corrected
 
 ### Current performance on synthetic data (`metric` lines of `cd test && make`)
 
 | Scenario | Position error |
 |---|---|
 | 0.3 m in 0.5 s (abrupt) | 0.6 mm |
-| 1 m in 2 s (smooth) | 2.7 cm |
-| 2 m in 3 s | 7.6 cm |
-| 1 m in 4 s (slow, peak 0.36 m/s²) | 15 cm |
-| 90° turn in place | 2.2 cm, attitude error 0.03° |
+| 1 m in 2 s (smooth) | 3.5 mm |
+| 2 m in 3 s | 8.3 mm |
+| 1 m in 4 s (slow, peak 0.36 m/s²) | 2.0 cm |
+| 90° turn in place | 1.5 cm, attitude error 0.03° |
 
 ### Known limitations (next improvement targets)
 
 - **Constant-velocity motion longer than 1 s is indistinguishable from rest.** This is inherent to a stand-alone IMU; shorter coasting phases are handled by the speed-dependent confirmation time
 - **Slow motion** with accelerations around 0.1 m/s² sits at the mean-acceleration threshold and comes out short
 - **Gyro-compass accuracy depends on the gyro bias.** If the bias exceeds the horizontal earth rate (about 0.0034 °/s in Tokyo) the initial heading is arbitrary (relative positioning is unaffected; the tests evaluate position error in the initial-heading-aligned frame)
-- **The velocity error observed at each ZUPT is not yet propagated back into the position** (next candidate)
+- **The retroactive ZUPT correction produces a position step.** It is applied at the moment the ZUPT is confirmed, so the output position jumps; if continuity matters it should be spread over the following segment
+- **Thresholds have not been tuned on real motion data.** The synthetic data includes noise, bias and earth rotation but not the real vibration signature
 
 ## Configuration
 
@@ -218,6 +220,7 @@ Main parameters in `SubCore1/src/localizer/localizer_config.h`:
 | `ZUPT_ACCEL_MEAN_THRESHOLD` | 0.1 m/s² | ZUPT mean-acceleration threshold |
 | `ZUPT_GYRO_MEAN_THRESHOLD` | 2 °/s | ZUPT mean angular-rate threshold |
 | `ZUPT_SLOW_CONFIRM_SPEED` / `SAMPLES` | 0.1 m/s / 1 s | confirmation period while the estimated speed is large |
+| `ZUPT_RETROACTIVE_CORRECTION` | 1 | enable the retroactive ZUPT position correction |
 | `IMU_RING_SIZE` (shared_types.h) | 256 | inter-core ring buffer length |
 | `IMU_NOTIFY_INTERVAL` (shared_types.h) | 8 | samples between wake-up notifications to SubCore1 (the receive FIFO has only 8 buffers) |
 

@@ -241,7 +241,7 @@ TEST(localizer_rotation_then_rest)
   CHECK_LT(r.finalTiltErrorDeg, 0.5f);
   CHECK_LT(r.finalHeadingDriftDeg, 1.0f);
   CHECK(r.stationaryAtEnd);
-  CHECK_LT(r.finalPositionError, 0.05f);
+  CHECK_LT(r.finalPositionError, 0.03f);
 }
 
 static RunResult translationRun(Localizer &loc, double duration, float distance, double rest = 3.0)
@@ -260,7 +260,7 @@ TEST(localizer_smooth_translation_2s)
   METRIC("estimated distance (m)", vec3Norm(r.last.position));
   METRIC("max tilt error during run (deg)", r.maxTiltErrorDeg);
   CHECK(r.stationaryAtEnd);
-  CHECK_LT(r.finalPositionError, 0.06f);
+  CHECK_LT(r.finalPositionError, 0.01f);
 }
 
 TEST(localizer_slow_translation_4s)
@@ -272,7 +272,7 @@ TEST(localizer_slow_translation_4s)
   METRIC("final position error (m)", r.finalPositionError);
   METRIC("estimated distance (m)", vec3Norm(r.last.position));
   CHECK(r.stationaryAtEnd);
-  CHECK_LT(r.finalPositionError, 0.25f);
+  CHECK_LT(r.finalPositionError, 0.05f);
 }
 
 TEST(localizer_abrupt_translation)
@@ -295,7 +295,7 @@ TEST(localizer_long_translation_3s_2m)
   METRIC("final position error (m)", r.finalPositionError);
   METRIC("estimated distance (m)", vec3Norm(r.last.position));
   CHECK(r.stationaryAtEnd);
-  CHECK_LT(r.finalPositionError, 0.15f);
+  CHECK_LT(r.finalPositionError, 0.03f);
 }
 
 TEST(localizer_gain_scheduling_reduces_motion_tilt_error)
@@ -313,6 +313,21 @@ TEST(localizer_gain_scheduling_reduces_motion_tilt_error)
   METRIC("position error without scheduling (m)", b.finalPositionError);
   CHECK_LT(a.maxTiltErrorDeg * 2.0f, b.maxTiltErrorDeg);
   CHECK_LT(a.finalPositionError, b.finalPositionError);
+}
+
+TEST(localizer_retroactive_zupt_correction_reduces_position_error)
+{
+  Localizer with;
+  const RunResult a = translationRun(with, 2.0, 1.0f);
+  Localizer without;
+  without.setRetroactiveCorrection(false);
+  const RunResult b = translationRun(without, 2.0, 1.0f);
+  METRIC("position error with correction (m)", a.finalPositionError);
+  METRIC("position error without correction (m)", b.finalPositionError);
+  METRIC("velocity error at ZUPT (m/s)", vec3Norm(with.integrator().lastVelocityError()));
+  METRIC("motion segment duration (s)", with.integrator().lastSegmentDuration());
+  CHECK(with.integrator().correctionCount() >= 1);
+  CHECK_LT(a.finalPositionError * 3.0f, b.finalPositionError);
 }
 
 TEST(localizer_stop_is_confirmed_quickly)

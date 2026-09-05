@@ -33,10 +33,12 @@ run: $(TARGET)
 $(TARGET): $(ALGO_OBJS) $(FUSION_OBJS) $(TEST_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ -lm
 
-$(BUILD)/localizer_%.o: $(SRC_DIR)/localizer/%.cpp | $(BUILD)
+ALGO_HDRS := $(wildcard $(SRC_DIR)/localizer/*.h) $(wildcard $(SRC_DIR)/Fusion/*.h)
+
+$(BUILD)/localizer_%.o: $(SRC_DIR)/localizer/%.cpp $(ALGO_HDRS) | $(BUILD)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
-$(BUILD)/fusion_%.o: $(SRC_DIR)/Fusion/%.c | $(BUILD)
+$(BUILD)/fusion_%.o: $(SRC_DIR)/Fusion/%.c $(wildcard $(SRC_DIR)/Fusion/*.h) | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BUILD)/%.o: %.cpp $(wildcard *.h) $(wildcard $(SRC_DIR)/localizer/*.h) ../shared_types.h | $(BUILD)

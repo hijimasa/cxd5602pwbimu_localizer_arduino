@@ -98,6 +98,12 @@ public:
   /** AHRS gain currently applied. */
   float currentAhrsGain() const { return currentGain_; }
 
+  /** Enable/disable the retroactive ZUPT position correction (enabled by default). */
+  void setRetroactiveCorrection(bool enabled) { integrator_.setRetroactiveCorrection(enabled); }
+
+  /** Integrator access for diagnostics (last ZUPT correction etc.). */
+  const VelocityIntegrator &integrator() const { return integrator_; }
+
 private:
   void startRunning(const ImuSample &sample);
   float computeDt(uint32_t timestamp);

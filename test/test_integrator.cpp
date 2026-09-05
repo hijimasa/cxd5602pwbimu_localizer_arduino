@@ -50,6 +50,7 @@ TEST(integrator_matches_reference_implementation)
   std::mt19937 rng(9);
   std::normal_distribution<float> n(0.0f, 1.0f);
   VelocityIntegrator integ;
+  integ.setRetroactiveCorrection(false); // the reference has no ZUPT correction
   ref::reset();
   const float dt = LOCALIZER_NOMINAL_DT;
   for (int i = 0; i < 30000; i++)
@@ -86,4 +87,65 @@ TEST(integrator_zupt_zeroes_velocity_and_clamps_speed)
   CHECK_NEAR(vec3Norm(integ.velocity()), LOCALIZER_MAX_VELOCITY, 1e-3);
   integ.update(vec3Zero(), 0.001f, true);
   CHECK_NEAR(vec3Norm(integ.velocity()), 0.0f, 1e-9);
+}
+
+TEST(integrator_retroactive_correction_removes_constant_bias_drift)
+{
+  // No true motion, but a constant acceleration error of 0.05 m/s^2 during a
+  // 2 s "motion" segment. The velocity error grows linearly, so the
+  // retroactive correction must cancel the position error exactly.
+  VelocityIntegrator integ;
+  const float dt = LOCALIZER_NOMINAL_DT;
+  for (int i = 0; i < 200; i++) integ.update(vec3Zero(), dt, true); // at rest
+  const int N = 2 * LOCALIZER_SAMPLE_RATE;
+  for (int i = 0; i < N; i++) integ.update(vec3(0.05f, 0.0f, 0.0f), dt, false);
+  const float T = N * dt;
+  CHECK_NEAR(integ.velocity().x, 0.05f * T, 1e-3);
+  CHECK_NEAR(integ.position().x, 0.5f * 0.05f * T * T, 2e-3);
+  integ.update(vec3Zero(), dt, true); // ZUPT
+  CHECK(integ.correctionCount() == 1);
+  CHECK_NEAR(integ.lastSegmentDuration(), T + dt, 1e-3);
+  CHECK_NEAR(integ.lastVelocityError().x, 0.05f * T, 1e-3);
+  CHECK_NEAR(integ.position().x, 0.0f, 3e-3);
+  CHECK_NEAR(integ.velocity().x, 0.0f, 1e-9);
+}
+
+TEST(integrator_retroactive_correction_keeps_true_displacement)
+{
+  // A genuine move: accelerate then decelerate symmetrically so the velocity
+  // returns to zero. There is no velocity error, so the ZUPT must not change
+  // the position.
+  VelocityIntegrator integ;
+  const float dt = 0.001f;
+  integ.update(vec3Zero(), dt, true);
+  for (int i = 0; i < 1000; i++) integ.update(vec3(1.0f, 0, 0), dt, false);
+  for (int i = 0; i < 1000; i++) integ.update(vec3(-1.0f, 0, 0), dt, false);
+  const float before = integ.position().x;
+  integ.update(vec3Zero(), dt, true);
+  CHECK_NEAR(integ.lastVelocityError().x, 0.0f, 1e-3);
+  CHECK_NEAR(integ.position().x - before, 0.0f, 1e-3);
+  CHECK_NEAR(before, 1.0f, 5e-3); // 0.5*1*1^2 + (1*1 - 0.5*1*1^2)
+}
+
+TEST(integrator_retroactive_correction_can_be_disabled_and_skips_clamped_segments)
+{
+  VelocityIntegrator integ;
+  integ.setRetroactiveCorrection(false);
+  const float dt = 0.001f;
+  integ.update(vec3Zero(), dt, true);
+  for (int i = 0; i < 1000; i++) integ.update(vec3(0.1f, 0, 0), dt, false);
+  const float before = integ.position().x;
+  const float step = integ.velocity().x * dt; // trapezoidal step of the ZUPT sample itself
+  integ.update(vec3Zero(), dt, true);
+  CHECK(integ.correctionCount() == 0);
+  CHECK_NEAR(integ.position().x, before + step, 1e-6);
+
+  VelocityIntegrator clamped;
+  clamped.update(vec3Zero(), dt, true);
+  for (int i = 0; i < 6000; i++) clamped.update(vec3(2.0f, 0, 0), dt, false); // hits 5 m/s
+  const float before2 = clamped.position().x;
+  const float step2 = clamped.velocity().x * dt;
+  clamped.update(vec3Zero(), dt, true);
+  CHECK(clamped.correctionCount() == 0);
+  CHECK_NEAR(clamped.position().x, before2 + step2, 1e-5);
 }

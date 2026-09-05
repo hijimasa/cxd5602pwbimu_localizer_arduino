@@ -80,5 +80,10 @@
 
 // ---- Velocity / position integration ---------------------------------------
 #define LOCALIZER_MAX_VELOCITY 5.0f              // m/s, runaway guard
+// When a ZUPT is confirmed the velocity should be zero; whatever is left is
+// the error accumulated since the motion segment began. Assuming it grew
+// linearly, the position error is v_err * T / 2 and is removed retroactively.
+#define ZUPT_RETROACTIVE_CORRECTION 1
+#define ZUPT_MAX_CORRECTION_SEGMENT 60.0f        // s, longer segments are not corrected
 
 #endif // LOCALIZER_CONFIG_H
