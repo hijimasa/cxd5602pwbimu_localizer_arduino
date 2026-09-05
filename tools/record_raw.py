@@ -10,10 +10,10 @@ timestamp gaps are printed at the end; a gap count of 0 means no sample was
 lost on the serial link.
 
 Closing the port while the 921600-baud stream is running tends to leave the
-CP210x USB-serial bridge in a state where nothing is received any more (the
-next upload then hangs). On Linux the script therefore resets the bridge at
-the USB level after recording (see usb_reset_cp210x.py); --no-usb-reset
-disables that.
+CP210x USB-serial bridge in a state where nothing is received any more (an
+empty recording, or the next upload hangs). On Linux the script therefore
+resets the bridge at the USB level before and after recording (see
+usb_reset_cp210x.py); --no-usb-reset disables that.
 """
 import argparse
 import os
@@ -103,6 +103,17 @@ def main():
     if not (args.port and args.seconds and args.output):
         ap.error("PORT SECONDS OUTPUT are required unless --parse is used")
 
+    def usb_reset():
+        if args.no_usb_reset or not sys.platform.startswith("linux"):
+            return
+        try:
+            import usb_reset_cp210x
+            usb_reset_cp210x.main([])
+            time.sleep(2.0)  # wait for re-enumeration
+        except Exception as e:  # best effort
+            print(f"usb reset skipped: {e}", file=sys.stderr)
+
+    usb_reset()  # a bridge left locked by a previous session would record nothing
     ser = serial.Serial(args.port, args.baud, timeout=0.5)
     t0 = time.time()
     chunks = []
@@ -118,12 +129,7 @@ def main():
         f.write(data)
     print(f"wrote {total} bytes to {args.output}")
     ok = summarize(data, args.seconds) > 0
-    if not args.no_usb_reset and sys.platform.startswith("linux"):
-        try:
-            import usb_reset_cp210x
-            usb_reset_cp210x.main([])
-        except Exception as e:  # best effort
-            print(f"usb reset skipped: {e}", file=sys.stderr)
+    usb_reset()
     if not ok:
         print("no IMU frames: is MainCore built with -DRAW_LOG_OUTPUT and the baud rate right?", file=sys.stderr)
         sys.exit(1)
