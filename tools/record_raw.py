@@ -65,10 +65,11 @@ def summarize(data, seconds):
     gaps = 0
     last_ts = None
     first_ts = None
+    calib_max_rate = 0.0  # largest angular rate (deg/s) during the calibration samples
     for t, payload in parse_frames(data):
         if t == 0:
             imu += 1
-            ts = struct.unpack_from("<I", payload, 0)[0]
+            ts, _temp, _ax, _ay, _az, gx, gy, gz = struct.unpack_from("<Ifffffff", payload, 0)
             if first_ts is None:
                 first_ts = ts
             if last_ts is not None:
@@ -76,6 +77,10 @@ def summarize(data, seconds):
                 if d > TICKS_PER_SAMPLE * 3 // 2:
                     gaps += 1
             last_ts = ts
+            if imu <= CALIBRATION_SAMPLES:
+                rate = (gx * gx + gy * gy + gz * gz) ** 0.5 * 57.2958
+                if rate > calib_max_rate:
+                    calib_max_rate = rate
         elif t == 1:
             pos += 1
         elif t == 2:
@@ -84,6 +89,9 @@ def summarize(data, seconds):
     rate = imu / span if span > 0 else 0.0
     print(f"imu frames: {imu} over {span:.1f} s ({rate:.1f}/s), position frames: {pos}, stats frames: {stats}")
     print(f"timestamp gaps (> 1.5 samples): {gaps}")
+    if imu >= CALIBRATION_SAMPLES:
+        verdict = "OK" if calib_max_rate < 1.0 else "MOVED - calibration is contaminated"
+        print(f"max angular rate during calibration: {calib_max_rate:.2f} deg/s ({verdict})")
     return imu
 
 
