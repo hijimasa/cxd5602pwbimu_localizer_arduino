@@ -3,6 +3,7 @@
 VelocityIntegrator::VelocityIntegrator()
 {
   retroactive_ = ZUPT_RETROACTIVE_CORRECTION != 0;
+  blendTime_ = ZUPT_CORRECTION_BLEND_TIME;
   reset();
 }
 
@@ -13,6 +14,8 @@ void VelocityIntegrator::reset()
   oldAccel_ = vec3Zero();
   oldVelocity_ = vec3Zero();
   initialised_ = false;
+  pendingCorrection_ = vec3Zero();
+  blendRemaining_ = 0.0f;
   wasStationary_ = true; // the run starts at rest: no segment is open
   segmentDuration_ = 0.0f;
   segmentClamped_ = false;
@@ -45,8 +48,17 @@ void VelocityIntegrator::update(Vec3 earthAccel, float dt, bool stationary)
           segmentDuration_ <= ZUPT_MAX_CORRECTION_SEGMENT)
       {
         lastCorrection_ = vec3Scale(velocity_, -0.5f * segmentDuration_);
-        position_ = vec3Add(position_, lastCorrection_);
         correctionCount_++;
+        if (blendTime_ > 0.0f)
+        {
+          // queue it; any remainder of a previous correction is merged
+          pendingCorrection_ = vec3Add(pendingCorrection_, lastCorrection_);
+          blendRemaining_ = blendTime_;
+        }
+        else
+        {
+          position_ = vec3Add(position_, lastCorrection_);
+        }
       }
     }
     velocity_ = vec3Zero();
@@ -64,6 +76,24 @@ void VelocityIntegrator::update(Vec3 earthAccel, float dt, bool stationary)
     }
   }
   wasStationary_ = stationary;
+
+  // Apply the pending correction gradually (independent of the ZUPT state)
+  if (blendRemaining_ > 0.0f)
+  {
+    if (dt >= blendRemaining_)
+    {
+      position_ = vec3Add(position_, pendingCorrection_);
+      pendingCorrection_ = vec3Zero();
+      blendRemaining_ = 0.0f;
+    }
+    else
+    {
+      const Vec3 step = vec3Scale(pendingCorrection_, dt / blendRemaining_);
+      position_ = vec3Add(position_, step);
+      pendingCorrection_ = vec3Sub(pendingCorrection_, step);
+      blendRemaining_ -= dt;
+    }
+  }
 
   oldAccel_ = earthAccel;
   oldVelocity_ = velocity_;

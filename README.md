@@ -137,6 +137,29 @@ The suite covers:
 
 Every scenario prints its current performance figures as `metric` lines. Tighten the bounds as the algorithm improves; never loosen them.
 
+## Recording and replaying device data
+
+Building MainCore with `RAW_LOG_OUTPUT` writes every IMU sample (1920 Hz) and the on-device position estimate (30 Hz) as binary frames to the serial port at 921600 baud. The recording can be replayed on the host through the same algorithm.
+
+```bash
+# build and upload the recording MainCore (SubCore1 stays the same)
+arduino-cli compile --upload -p /dev/ttyUSB0 \
+  --build-property "build.extra_flags=-DRAW_LOG_OUTPUT" \
+  --fqbn SPRESENSE:spresense:spresense:Core=Main .
+
+# record 60 s (opening the port resets the board: the 15 s calibration is included)
+python3 tools/record_raw.py /dev/ttyUSB0 60 logs/desk_1m.bin
+
+# replay on the host (--csv writes the 30 Hz estimate; features can be disabled for comparison)
+cd test && make replay
+./out/replay ../logs/desk_1m.bin --csv desk_1m.csv
+./out/replay ../logs/desk_1m.bin --no-retro
+```
+
+The replay prints the maximum deviation from the device's own estimate; since both run the same code it is normally 0 for the position and below 1e-5 for the quaternion.
+
+The recording firmware stays silent for 2 s after boot so that the flash writer can synchronise with the boot ROM. Reading the 921600-baud stream at another baud rate can nevertheless lock up the host's USB-serial bridge (CP210x): nothing is received any more and an upload hangs in `flash_writer` waiting for the prompt. Kill `flash_writer`, run `python3 tools/usb_reset_cp210x.py` (USB-level reset, no unplugging needed) and retry the upload.
+
 ## Project Structure
 
 ```
@@ -158,7 +181,11 @@ cxd5602pwbimu_localizer_arduino/
 │           └── localizer.*               # pipeline
 ├── test/                                 # host unit tests (make)
 │   ├── imu_simulator.h                   # synthetic IMU generator
+│   ├── replay.cpp                        # replay device recordings (make replay)
 │   └── test_*.cpp
+├── tools/
+│   ├── record_raw.py                     # record raw device data
+│   └── usb_reset_cp210x.py               # recover a locked-up USB-serial bridge
 └── Fusion/                               # Fusion library (submodule)
 ```
 
@@ -183,7 +210,7 @@ cxd5602pwbimu_localizer_arduino/
 7b. **Gain scheduling:** confirmed stationary → 0.5; moving (high variance, or large mean acceleration/rotation) → 0.02; low variance and low mean but not yet confirmed → 0.1. A "low variance but large mean acceleration" state lasting more than 2 s is assumed to be an attitude error at rest and falls back to 0.1
 8. **Bias learning:** while stationary, the residual acceleration is learned with a 1 s time constant
 9. **Integration:** trapezoidal velocity and position; velocity is reset to zero while stationary
-10. **Retroactive ZUPT correction:** when a ZUPT is confirmed at the end of a motion segment of duration T, the remaining velocity v_err is error, and v_err × T / 2 is subtracted from the position. Segments in which the velocity limit was hit, or longer than 60 s, are not corrected
+10. **Retroactive ZUPT correction:** when a ZUPT is confirmed at the end of a motion segment of duration T, the remaining velocity v_err is error, and v_err × T / 2 is subtracted from the position. To keep the output continuous the correction is spread linearly over the second after the ZUPT instead of being applied as a step (a further ZUPT during that time merges its correction). Segments in which the velocity limit was hit, or longer than 60 s, are not corrected
 
 ### Current performance on synthetic data (`metric` lines of `cd test && make`)
 
@@ -200,8 +227,7 @@ cxd5602pwbimu_localizer_arduino/
 - **Constant-velocity motion longer than 1 s is indistinguishable from rest.** This is inherent to a stand-alone IMU; shorter coasting phases are handled by the speed-dependent confirmation time
 - **Slow motion** with accelerations around 0.1 m/s² sits at the mean-acceleration threshold and comes out short
 - **Gyro-compass accuracy depends on the gyro bias.** If the bias exceeds the horizontal earth rate (about 0.0034 °/s in Tokyo) the initial heading is arbitrary (relative positioning is unaffected; the tests evaluate position error in the initial-heading-aligned frame)
-- **The retroactive ZUPT correction produces a position step.** It is applied at the moment the ZUPT is confirmed, so the output position jumps; if continuity matters it should be spread over the following segment
-- **Thresholds have not been tuned on real motion data.** The synthetic data includes noise, bias and earth rotation but not the real vibration signature
+- **Thresholds have not been tuned on real motion data.** The synthetic data includes noise, bias and earth rotation but not the real vibration signature. Recordings from the device can be replayed on the host (see below) to close this gap
 
 ## Configuration
 
@@ -221,6 +247,7 @@ Main parameters in `SubCore1/src/localizer/localizer_config.h`:
 | `ZUPT_GYRO_MEAN_THRESHOLD` | 2 °/s | ZUPT mean angular-rate threshold |
 | `ZUPT_SLOW_CONFIRM_SPEED` / `SAMPLES` | 0.1 m/s / 1 s | confirmation period while the estimated speed is large |
 | `ZUPT_RETROACTIVE_CORRECTION` | 1 | enable the retroactive ZUPT position correction |
+| `ZUPT_CORRECTION_BLEND_TIME` | 1.0 s | time over which the correction is spread (0 = instant) |
 | `IMU_RING_SIZE` (shared_types.h) | 256 | inter-core ring buffer length |
 | `IMU_NOTIFY_INTERVAL` (shared_types.h) | 8 | samples between wake-up notifications to SubCore1 (the receive FIFO has only 8 buffers) |
 

@@ -16,7 +16,8 @@
 #error "Core selection is wrong!! Must select MainCore"
 #endif
 
-// #define VERBOSE_OUTPUT
+// #define VERBOSE_OUTPUT   // human readable statistics every 5 s
+// #define RAW_LOG_OUTPUT   // binary raw IMU + position frames at RAW_LOG_BAUD (for test/replay)
 
 #include <stdio.h>
 #include <sys/ioctl.h>
@@ -73,8 +74,32 @@ static int drop_50msdata(int fd, int samprate)
   return 0;
 }
 
+#ifdef RAW_LOG_OUTPUT
+static void writeRawFrame(uint8_t type, const void *payload, size_t len)
+{
+  static uint8_t frame[2 + 1 + 128 + 1];
+  if (len > 128) return;
+  frame[0] = RAW_LOG_SYNC0;
+  frame[1] = RAW_LOG_SYNC1;
+  frame[2] = type;
+  uint8_t sum = type;
+  const uint8_t *p = (const uint8_t *)payload;
+  for (size_t i = 0; i < len; i++)
+  {
+    frame[3 + i] = p[i];
+    sum ^= p[i];
+  }
+  frame[3 + len] = sum;
+  Serial.write(frame, 4 + len);
+}
+#endif
+
 static void printPosition(const PositionData_t *pos_data)
 {
+#ifdef RAW_LOG_OUTPUT
+  writeRawFrame(RAW_LOG_TYPE_POSITION, pos_data, sizeof(PositionData_t));
+  return;
+#endif
   // Hex-encoded IEEE754 floats, same field order as before:
   // timestamp, temp, gx, gy, gz, ax, ay, az, qw, qx, qy, qz, vx, vy, vz, px, py, pz
   Serial.printf("%08x,%08x,%08x,%08x,"
@@ -104,7 +129,14 @@ static void printPosition(const PositionData_t *pos_data)
 
 void setup()
 {
+#ifdef RAW_LOG_OUTPUT
+  // Stay silent for a moment after boot: the flash writer needs a quiet
+  // 115200-baud link right after the DTR reset to catch the boot ROM prompt.
+  delay(2000);
+  Serial.begin(RAW_LOG_BAUD);
+#else
   Serial.begin(115200);
+#endif
 #ifdef VERBOSE_OUTPUT
   Serial.println("MainCore: starting IMU localizer (MainCore I/O + SubCore1 processing)");
 #endif
@@ -149,6 +181,9 @@ static void handleSubCoreMessages()
     {
       g_stats = *(const ProcessingStats_t *)msgdata;
       g_stats_valid = true;
+#ifdef RAW_LOG_OUTPUT
+      writeRawFrame(RAW_LOG_TYPE_STATS, &g_stats, sizeof(ProcessingStats_t));
+#endif
     }
   }
 }
@@ -208,6 +243,9 @@ void loop()
       sample.gz = g_data[i].gz;
 
       const uint32_t head = imu_ring_push(&g_imu_ring, &sample);
+#ifdef RAW_LOG_OUTPUT
+      writeRawFrame(RAW_LOG_TYPE_IMU, &sample, sizeof(ImuRawData_t));
+#endif
       // The notification only wakes SubCore1; the data is already in the
       // ring. It is sent every IMU_NOTIFY_INTERVAL samples so that the
       // receiver's 8-entry FIFO can never overflow (see shared_types.h).

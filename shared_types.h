@@ -87,6 +87,22 @@ typedef struct
 } ProcessingStats_t;
 
 /* -------------------------------------------------------------------------
+ * Raw log frames (MainCore built with -DRAW_LOG_OUTPUT).
+ *
+ * Every IMU sample and every position estimate is written to the serial
+ * port as a binary frame so that a recording can be replayed through the
+ * exact same pipeline on a host PC (test/replay). Frame layout:
+ *   'S' 'P' type payload[] checksum
+ * where checksum is the XOR of type and all payload bytes.
+ * ---------------------------------------------------------------------- */
+#define RAW_LOG_BAUD 921600
+#define RAW_LOG_SYNC0 'S'
+#define RAW_LOG_SYNC1 'P'
+#define RAW_LOG_TYPE_IMU 0      // payload: ImuRawData_t
+#define RAW_LOG_TYPE_POSITION 1 // payload: PositionData_t
+#define RAW_LOG_TYPE_STATS 2    // payload: ProcessingStats_t
+
+/* -------------------------------------------------------------------------
  * Single-producer / single-consumer ring buffer for the IMU stream.
  *
  * The producer (MainCore) writes entries[head % SIZE] and then increments

@@ -85,5 +85,9 @@
 // linearly, the position error is v_err * T / 2 and is removed retroactively.
 #define ZUPT_RETROACTIVE_CORRECTION 1
 #define ZUPT_MAX_CORRECTION_SEGMENT 60.0f        // s, longer segments are not corrected
+// The correction is not applied as a step: it is spread linearly over this
+// duration after the ZUPT so that the output position stays continuous.
+// 0 applies it instantly.
+#define ZUPT_CORRECTION_BLEND_TIME 1.0f          // s
 
 #endif // LOCALIZER_CONFIG_H

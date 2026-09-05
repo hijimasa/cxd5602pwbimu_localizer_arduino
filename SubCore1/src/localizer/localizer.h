@@ -100,6 +100,8 @@ public:
 
   /** Enable/disable the retroactive ZUPT position correction (enabled by default). */
   void setRetroactiveCorrection(bool enabled) { integrator_.setRetroactiveCorrection(enabled); }
+  /** Blend duration of the retroactive correction (0 = instant). */
+  void setCorrectionBlendTime(float seconds) { integrator_.setCorrectionBlendTime(seconds); }
 
   /** Integrator access for diagnostics (last ZUPT correction etc.). */
   const VelocityIntegrator &integrator() const { return integrator_; }

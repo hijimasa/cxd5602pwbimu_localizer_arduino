@@ -330,6 +330,40 @@ TEST(localizer_retroactive_zupt_correction_reduces_position_error)
   CHECK_LT(a.finalPositionError * 3.0f, b.finalPositionError);
 }
 
+TEST(localizer_position_output_has_no_step_at_zupt)
+{
+  // The blended correction must keep the output position continuous: the
+  // largest per-sample position change after the stop must be far below
+  // the total correction.
+  Localizer loc;
+  SimConfig cfg = realisticNoise();
+  ImuSimulator sim(cfg);
+  const double t0 = 17.0, dur = 2.0;
+  const TrajectoryFn traj = translationTrajectory(LEVEL, t0, dur, vec3(1.0f, 0, 0));
+  Vec3 prev = vec3Zero();
+  float maxStepAfterStop = 0.0f;
+  bool first = true;
+  for (uint64_t k = 0; k < (uint64_t)(22.0 * LOCALIZER_SAMPLE_RATE); k++)
+  {
+    const double t = (double)k / LOCALIZER_SAMPLE_RATE;
+    if (!loc.update(sim.sample(k, traj))) continue;
+    const Vec3 p = loc.state().position;
+    if (!first && t > t0 + dur)
+    {
+      const float step = vec3Norm(vec3Sub(p, prev));
+      if (step > maxStepAfterStop) maxStepAfterStop = step;
+    }
+    prev = p;
+    first = false;
+  }
+  const float total = vec3Norm(loc.integrator().lastCorrection());
+  METRIC("total correction (m)", total);
+  METRIC("max per-sample position step after stop (m)", maxStepAfterStop);
+  CHECK(total > 0.0f);
+  CHECK_LT(maxStepAfterStop, total * 2.0f * LOCALIZER_NOMINAL_DT / ZUPT_CORRECTION_BLEND_TIME + 1e-4f);
+  CHECK_NEAR(vec3Norm(loc.integrator().pendingCorrection()), 0.0f, 1e-6);
+}
+
 TEST(localizer_stop_is_confirmed_quickly)
 {
   // After a genuine stop the estimated speed is small, so the fast

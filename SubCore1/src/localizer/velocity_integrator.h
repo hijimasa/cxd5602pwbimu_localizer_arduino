@@ -7,8 +7,10 @@
  * Retroactive correction: when a zero-velocity update is confirmed the
  * velocity should be zero; the remaining velocity is the error accumulated
  * during the motion segment that just ended. Modelling that error as growing
- * linearly over the segment duration T, the position error is v_err * T / 2
- * and is subtracted at the moment of the ZUPT.
+ * linearly over the segment duration T, the position error is v_err * T / 2.
+ * To keep the output continuous the correction is spread linearly over
+ * ZUPT_CORRECTION_BLEND_TIME after the ZUPT instead of being applied as a
+ * step.
  */
 #ifndef VELOCITY_INTEGRATOR_H
 #define VELOCITY_INTEGRATOR_H
@@ -35,9 +37,13 @@ public:
   Vec3 position() const { return position_; }
 
   void setRetroactiveCorrection(bool enabled) { retroactive_ = enabled; }
+  /** Blend duration in seconds (0 = apply corrections instantly). */
+  void setCorrectionBlendTime(float seconds) { blendTime_ = seconds; }
 
-  /** Position correction applied at the most recent ZUPT (m). */
+  /** Total position correction decided at the most recent ZUPT (m). */
   Vec3 lastCorrection() const { return lastCorrection_; }
+  /** Part of the correction(s) not yet applied to the position (m). */
+  Vec3 pendingCorrection() const { return pendingCorrection_; }
   /** Velocity error observed at the most recent ZUPT (m/s). */
   Vec3 lastVelocityError() const { return lastVelocityError_; }
   /** Duration of the motion segment that ended at the most recent ZUPT (s). */
@@ -52,6 +58,9 @@ private:
   bool initialised_;
 
   bool retroactive_;
+  float blendTime_;
+  Vec3 pendingCorrection_;
+  float blendRemaining_;
   bool wasStationary_;
   float segmentDuration_;   // time since the current motion segment began
   bool segmentClamped_;     // velocity limit hit during this segment

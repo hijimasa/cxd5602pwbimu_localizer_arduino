@@ -95,6 +95,7 @@ TEST(integrator_retroactive_correction_removes_constant_bias_drift)
   // 2 s "motion" segment. The velocity error grows linearly, so the
   // retroactive correction must cancel the position error exactly.
   VelocityIntegrator integ;
+  integ.setCorrectionBlendTime(0.0f); // instant, to check the amount exactly
   const float dt = LOCALIZER_NOMINAL_DT;
   for (int i = 0; i < 200; i++) integ.update(vec3Zero(), dt, true); // at rest
   const int N = 2 * LOCALIZER_SAMPLE_RATE;
@@ -125,6 +126,65 @@ TEST(integrator_retroactive_correction_keeps_true_displacement)
   CHECK_NEAR(integ.lastVelocityError().x, 0.0f, 1e-3);
   CHECK_NEAR(integ.position().x - before, 0.0f, 1e-3);
   CHECK_NEAR(before, 1.0f, 5e-3); // 0.5*1*1^2 + (1*1 - 0.5*1*1^2)
+}
+
+TEST(integrator_correction_is_blended_without_position_step)
+{
+  VelocityIntegrator integ;
+  integ.setCorrectionBlendTime(1.0f);
+  const float dt = LOCALIZER_NOMINAL_DT;
+  integ.update(vec3Zero(), dt, true);
+  const int N = 2 * LOCALIZER_SAMPLE_RATE;
+  for (int i = 0; i < N; i++) integ.update(vec3(0.05f, 0.0f, 0.0f), dt, false);
+  const float T = (N + 1) * dt;
+  const float vErr = integ.velocity().x;
+  const float expectedCorrection = -0.5f * vErr * T;
+  const float posBefore = integ.position().x;
+
+  // ZUPT sample: the correction is queued, only a small first slice applied
+  integ.update(vec3Zero(), dt, true);
+  CHECK(integ.correctionCount() == 1);
+  CHECK_NEAR(integ.lastCorrection().x, expectedCorrection, 1e-4);
+  const float maxStep = fabsf(expectedCorrection) * dt / 1.0f * 1.01f + fabsf(vErr) * dt;
+  CHECK_LT(fabsf(integ.position().x - posBefore), maxStep);
+
+  // every following sample moves the position by at most one slice
+  float prev = integ.position().x;
+  int samples = 0;
+  while (vec3Norm(integ.pendingCorrection()) > 0.0f && samples < 3 * LOCALIZER_SAMPLE_RATE)
+  {
+    integ.update(vec3Zero(), dt, true);
+    CHECK_LT(fabsf(integ.position().x - prev), fabsf(expectedCorrection) * dt * 1.01f + 1e-9f);
+    prev = integ.position().x;
+    samples++;
+  }
+  // fully applied after the blend time
+  CHECK_NEAR(samples * dt, 1.0f, 2.0f * dt);
+  CHECK_NEAR(integ.position().x, 0.0f, 3e-3);
+}
+
+TEST(integrator_new_zupt_during_blend_merges_corrections)
+{
+  VelocityIntegrator integ;
+  integ.setCorrectionBlendTime(1.0f);
+  const float dt = LOCALIZER_NOMINAL_DT;
+  integ.update(vec3Zero(), dt, true);
+  for (int i = 0; i < LOCALIZER_SAMPLE_RATE; i++) integ.update(vec3(0.1f, 0, 0), dt, false);
+  integ.update(vec3Zero(), dt, true); // first ZUPT: correction ~ -0.05
+  const float c1 = integ.lastCorrection().x;
+  // blending continues through rest and motion: 0.25 s rest + 0.25 s motion
+  // leaves half of c1 pending when the second ZUPT arrives
+  for (int i = 0; i < LOCALIZER_SAMPLE_RATE / 4; i++) integ.update(vec3Zero(), dt, true);
+  for (int i = 0; i < LOCALIZER_SAMPLE_RATE / 4; i++) integ.update(vec3(0.1f, 0, 0), dt, false);
+  integ.update(vec3Zero(), dt, true); // second ZUPT
+  const float c2 = integ.lastCorrection().x;
+  CHECK(integ.correctionCount() == 2);
+  CHECK_NEAR(c2, -0.5f * 0.1f * 0.25f * 0.25f, 5e-4);
+  CHECK_NEAR(integ.pendingCorrection().x, 0.5f * c1 + c2, fabsf(c1) * 0.02f);
+  for (int i = 0; i < 2 * LOCALIZER_SAMPLE_RATE; i++) integ.update(vec3Zero(), dt, true);
+  CHECK_NEAR(integ.pendingCorrection().x, 0.0f, 1e-9);
+  // both segments were pure error: the position must return to ~0
+  CHECK_NEAR(integ.position().x, 0.0f, 3e-3);
 }
 
 TEST(integrator_retroactive_correction_can_be_disabled_and_skips_clamped_segments)

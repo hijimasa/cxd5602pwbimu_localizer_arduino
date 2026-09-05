@@ -21,11 +21,17 @@ FUSION_OBJS := $(patsubst $(SRC_DIR)/Fusion/%.c,$(BUILD)/fusion_%.o,$(FUSION_SRC
 TEST_OBJS := $(patsubst %.cpp,$(BUILD)/%.o,$(TEST_SRCS))
 
 TARGET := $(BUILD)/run_tests
+REPLAY := $(BUILD)/replay
 
-.PHONY: all build run clean
+.PHONY: all build run clean replay
 all: run
 
-build: $(TARGET)
+build: $(TARGET) $(REPLAY)
+
+replay: $(REPLAY)
+
+$(REPLAY): $(ALGO_OBJS) $(FUSION_OBJS) $(BUILD)/replay.o
+	$(CXX) $(CXXFLAGS) -o $@ $^ -lm
 
 run: $(TARGET)
 	./$(TARGET) $(ARGS)
