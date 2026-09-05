@@ -9,6 +9,7 @@ Localizer::Localizer()
   earthRateCompensation_ = true;
   biasLearning_ = true;
   gainScheduling_ = true;
+  accelBiasPreset_ = vec3Zero(); // survives reset(): it is a device constant
   reset();
 }
 
@@ -70,8 +71,10 @@ Vec3 Localizer::gyroOffsetEstimate() const
               offset_.gyroscopeOffset.axis.z * DEG_TO_RAD_F);
 }
 
-bool Localizer::update(const ImuSample &sample)
+bool Localizer::update(const ImuSample &rawSample)
 {
+  ImuSample sample = rawSample;
+  sample.accel = vec3Sub(sample.accel, accelBiasPreset_);
   if (phase_ == CALIBRATING)
   {
     if (alignmentAccumulator_.add(sample.accel, sample.gyro))

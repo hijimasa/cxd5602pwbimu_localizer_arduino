@@ -95,6 +95,15 @@ public:
     alignmentAccumulator_.setRequiredSamples((uint32_t)(seconds * LOCALIZER_SAMPLE_RATE + 0.5f));
   }
 
+  /**
+   * Accelerometer bias known from a multi-orientation calibration
+   * (accel_bias_fit.h), subtracted from every raw sample before anything
+   * else. Components perpendicular to gravity cannot be learned at run time,
+   * so this is the only way to remove them.
+   */
+  void setAccelBiasPreset(Vec3 bias) { accelBiasPreset_ = bias; }
+  Vec3 accelBiasPreset() const { return accelBiasPreset_; }
+
   /** Enable/disable earth rotation compensation (enabled by default). */
   void setEarthRateCompensation(bool enabled) { earthRateCompensation_ = enabled; }
 
@@ -133,6 +142,7 @@ private:
   VelocityIntegrator integrator_;
 
   Vec3 accelBias_;
+  Vec3 accelBiasPreset_;
   Vec3 earthRateNwu_;
   bool earthRateCompensation_;
   bool biasLearning_;

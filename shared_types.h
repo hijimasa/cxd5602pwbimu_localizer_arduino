@@ -29,6 +29,8 @@
 // Message IDs for inter-core communication
 #define MSG_ID_RING_ADDR 0x01     // MainCore -> SubCore: address of the ImuRing_t
 #define MSG_ID_IMU_AVAILABLE 0x02 // MainCore -> SubCore: new samples in the ring (data = head)
+#define MSG_ID_ACCEL_BIAS 0x03    // MainCore -> SubCore: pointer to AccelBiasPreset_t (then resets)
+#define MSG_ID_RESET 0x04         // MainCore -> SubCore: restart the localizer (re-calibrate)
 #define MSG_ID_POSITION 0x05      // SubCore -> MainCore: pointer to PositionData_t
 #define MSG_ID_STATS 0x12         // SubCore -> MainCore: pointer to ProcessingStats_t
 
@@ -49,6 +51,16 @@ typedef struct
   float gy;
   float gz;
 } ImuRawData_t;
+
+/**
+ * @brief Accelerometer bias from the multi-orientation calibration
+ *        (stored by MainCore in flash, applied by SubCore1).
+ */
+typedef struct
+{
+  float bias[3]; // m/s^2, sensor frame
+  uint8_t valid; // 0 = no calibration stored
+} AccelBiasPreset_t;
 
 /**
  * @brief Position estimation result (SubCore -> MainCore, OUTPUT_RATE_HZ)
@@ -84,6 +96,7 @@ typedef struct
   uint32_t max_batch;         // most samples drained from the ring in one wake-up
   float accel_bias[3];        // current accel bias estimate (m/s^2)
   float gyro_offset[3];       // initial gyro offset estimate (rad/s)
+  float accel_bias_preset[3]; // preset in use (m/s^2)
 } ProcessingStats_t;
 
 /* -------------------------------------------------------------------------
@@ -101,6 +114,7 @@ typedef struct
 #define RAW_LOG_TYPE_IMU 0      // payload: ImuRawData_t
 #define RAW_LOG_TYPE_POSITION 1 // payload: PositionData_t
 #define RAW_LOG_TYPE_STATS 2    // payload: ProcessingStats_t
+#define RAW_LOG_TYPE_PRESET 3   // payload: AccelBiasPreset_t (sent at start-up)
 
 /* -------------------------------------------------------------------------
  * Single-producer / single-consumer ring buffer for the IMU stream.

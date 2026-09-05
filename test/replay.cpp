@@ -5,6 +5,7 @@
  *
  * Usage: replay LOG.bin [--csv OUT.csv] [--calib-seconds S] [--no-earth-rate]
  *                       [--no-gain-schedule] [--no-retro] [--no-bias-learning]
+ *                       [--no-preset] [--preset BX BY BZ]
  *
  * Prints run statistics and, if the log also contains the position frames
  * produced on the device, the maximum deviation between the device estimate
@@ -26,6 +27,7 @@ int main(int argc, char **argv)
     return 2;
   }
   const char *csvPath = nullptr;
+  bool noPreset = false;
   Localizer loc;
   for (int i = 2; i < argc; i++)
   {
@@ -35,6 +37,12 @@ int main(int argc, char **argv)
     else if (!std::strcmp(argv[i], "--no-gain-schedule")) loc.setGainScheduling(false);
     else if (!std::strcmp(argv[i], "--no-retro")) loc.setRetroactiveCorrection(false);
     else if (!std::strcmp(argv[i], "--no-bias-learning")) loc.setBiasLearning(false);
+    else if (!std::strcmp(argv[i], "--no-preset")) noPreset = true;
+    else if (!std::strcmp(argv[i], "--preset") && i + 3 < argc)
+    {
+      const float x = (float)std::atof(argv[++i]), y = (float)std::atof(argv[++i]), z = (float)std::atof(argv[++i]);
+      loc.setAccelBiasPreset(vec3(x, y, z));
+    }
   }
 
   std::vector<uint8_t> data;
@@ -93,6 +101,16 @@ int main(int argc, char **argv)
                      t, st.stationary ? 1 : 0, st.quaternion.w, st.quaternion.x, st.quaternion.y, st.quaternion.z,
                      st.velocity.x, st.velocity.y, st.velocity.z, st.position.x, st.position.y, st.position.z,
                      st.earthAccel.x, st.earthAccel.y, st.earthAccel.z, st.gyro.x, st.gyro.y, st.gyro.z, loc.currentAhrsGain());
+      }
+    }
+    else if (fr.type == RAW_LOG_TYPE_PRESET)
+    {
+      AccelBiasPreset_t preset;
+      std::memcpy(&preset, fr.payload.data(), sizeof(preset));
+      if (preset.valid && !noPreset)
+      {
+        loc.setAccelBiasPreset(vec3(preset.bias[0], preset.bias[1], preset.bias[2]));
+        std::printf("accel bias preset from recording: [%.4f %.4f %.4f] m/s^2\n", preset.bias[0], preset.bias[1], preset.bias[2]);
       }
     }
     else if (fr.type == RAW_LOG_TYPE_POSITION)

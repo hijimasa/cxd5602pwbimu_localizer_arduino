@@ -106,6 +106,10 @@ static void sendStats(uint32_t now)
   s.gyro_offset[0] = offset.x;
   s.gyro_offset[1] = offset.y;
   s.gyro_offset[2] = offset.z;
+  const Vec3 preset = localizer.accelBiasPreset();
+  s.accel_bias_preset[0] = preset.x;
+  s.accel_bias_preset[1] = preset.y;
+  s.accel_bias_preset[2] = preset.z;
   MP.Send(MSG_ID_STATS, &s, 0);
   stats_samples_start = d.samplesProcessed;
   last_stats_time = now;
@@ -151,6 +155,18 @@ static void handleMessage(int8_t msgid, uint32_t msgdata)
   {
     imu_ring = (const ImuRing_t *)msgdata;
     ring_tail = imu_ring->head; // start with the samples that arrive from now on
+  }
+  else if (msgid == MSG_ID_ACCEL_BIAS)
+  {
+    const AccelBiasPreset_t *preset = (const AccelBiasPreset_t *)msgdata;
+    localizer.setAccelBiasPreset(preset->valid ? vec3(preset->bias[0], preset->bias[1], preset->bias[2]) : vec3Zero());
+    localizer.reset(); // re-run the stationary calibration with the new preset
+    output_divider = 0;
+  }
+  else if (msgid == MSG_ID_RESET)
+  {
+    localizer.reset();
+    output_divider = 0;
   }
   // MSG_ID_IMU_AVAILABLE carries no information beyond "wake up"
 }

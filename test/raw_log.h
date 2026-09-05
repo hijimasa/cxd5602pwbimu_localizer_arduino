@@ -18,18 +18,20 @@ struct Frame
   std::vector<uint8_t> payload;
 };
 
-static size_t frameSize(uint8_t type)
+static inline size_t frameSize(uint8_t type)
 {
   switch (type)
   {
   case RAW_LOG_TYPE_IMU: return sizeof(ImuRawData_t);
   case RAW_LOG_TYPE_POSITION: return sizeof(PositionData_t);
   case RAW_LOG_TYPE_STATS: return sizeof(ProcessingStats_t);
+  case RAW_LOG_TYPE_PRESET: return sizeof(AccelBiasPreset_t);
   default: return 0;
   }
 }
 
-static std::vector<Frame> parse(const std::vector<uint8_t> &d, size_t &bad)
+/** Extract all valid frames; `bad` receives the number of skipped bytes. */
+static inline std::vector<Frame> parse(const std::vector<uint8_t> &d, size_t &bad)
 {
   std::vector<Frame> out;
   size_t i = 0;
@@ -58,7 +60,6 @@ static std::vector<Frame> parse(const std::vector<uint8_t> &d, size_t &bad)
   }
   return out;
 }
-
 
 /** Read a whole file; returns false if it cannot be opened. */
 static inline bool readFile(const char *path, std::vector<uint8_t> &data)

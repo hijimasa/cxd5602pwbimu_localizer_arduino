@@ -137,6 +137,18 @@ The suite covers:
 
 Every scenario prints its current performance figures as `metric` lines. Tighten the bounds as the algorithm improves; never loosen them.
 
+## Accelerometer bias calibration (six orientations)
+
+The stationary calibration at start-up can only observe the accelerometer bias along gravity; the components perpendicular to it are absorbed into the attitude and show up as horizontal errors once the sensor is tilted a lot or carried by hand. The normal build offers a guided six-orientation calibration over the serial port; the result is stored in the SPI flash and used automatically from the next boot on.
+
+1. Send `C` from the serial monitor (115200 baud). Position output pauses and the first orientation is requested
+2. Put the sensor in the requested orientation (+Z up = board flat, −Z up = upside down, ±X / ±Y up = board standing on an edge), keep it still and send `Y`. Three seconds are measured; if the sensor moved you are asked to repeat that orientation
+3. After six orientations the three-axis bias and the residual are printed and saved. SubCore1 restarts its 15 s stationary calibration with the new bias, so keep the sensor still
+
+A few degrees of misalignment per orientation do not matter (it is a sphere fit; six roughly orthogonal directions are enough). Other commands: `P` print the stored preset, `X` erase it, `R` restart the localizer (15 s still), `Q` abort the calibration. The raw-logging build ignores commands but writes the stored preset at the start of the recording so that the replay applies the same value (`--no-preset`, `--preset x y z` override it).
+
+Typical result for this board: z ≈ +0.04 m/s², y ≈ −0.012 m/s².
+
 ## Recording and replaying device data
 
 Building MainCore with `RAW_LOG_OUTPUT` writes every IMU sample (1920 Hz) and the on-device position estimate (30 Hz) as binary frames to the serial port at 921600 baud. The recording can be replayed on the host through the same algorithm.
@@ -172,8 +184,9 @@ The recording firmware stays silent for 2 s after boot so that the flash writer 
 
 ```
 cxd5602pwbimu_localizer_arduino/
-├── cxd5602pwbimu_localizer_arduino.ino  # MainCore: IMU acquisition & serial output
+├── cxd5602pwbimu_localizer_arduino.ino  # MainCore: IMU acquisition, serial output, six-orientation calibration
 ├── shared_types.h                        # inter-core structs and ring buffer
+├── accel_bias_fit.h, vec_math.h          # links into SubCore1/src/localizer/ (used by MainCore's calibration)
 ├── SubCore1/
 │   ├── SubCore1.ino                      # SubCore1: runs the pipeline, sends results
 │   ├── shared_types.h -> ../shared_types.h
@@ -183,6 +196,7 @@ cxd5602pwbimu_localizer_arduino/
 │           ├── localizer_config.h        # all parameters
 │           ├── vec_math.h                # vectors and quaternions
 │           ├── initial_alignment.*       # initial attitude / offset / bias
+│           ├── accel_bias_fit.h          # six-orientation sphere fit
 │           ├── gaussian_filter.*         # causal Gaussian filter
 │           ├── zupt_detector.*           # variance based ZUPT
 │           ├── velocity_integrator.*     # trapezoidal integration
@@ -207,7 +221,7 @@ cxd5602pwbimu_localizer_arduino/
 1. Average the accelerometer and gyroscope readings
 2. Up = direction of the mean acceleration, North = horizontal component of the mean angular rate, West = Up × North; the initial quaternion is built from this NWU triad
 3. The earth rotation vector for the configured latitude is rotated into the sensor frame and subtracted from the mean angular rate; the remainder is the gyro offset
-4. The expected gravity vector is subtracted from the mean acceleration to obtain the accelerometer bias (the component perpendicular to gravity is unobservable at a single orientation)
+4. The expected gravity vector is subtracted from the mean acceleration to obtain the accelerometer bias (the component perpendicular to gravity is unobservable at a single orientation, which is why the six-orientation preset is subtracted beforehand)
 
 ### Per-sample pipeline
 
