@@ -1,9 +1,16 @@
 /**
  * @file SubCore1.ino
- * @brief Gaussian Filter Processing Core
+ * @brief Localizer processing core.
  *
- * SubCore1: Receives raw IMU data and applies causal Gaussian filter
- * for noise reduction, then forwards to SubCore2 (AHRS)
+ * SubCore1 pulls raw IMU samples from the ring buffer owned by MainCore,
+ * runs the complete localization pipeline (see src/localizer/localizer.h)
+ * and returns position estimates at OUTPUT_RATE_HZ plus periodic
+ * statistics to MainCore.
+ *
+ * Data never passes through a single shared struct: the IMU stream lives in
+ * a ring buffer, so a temporary stall on either core is absorbed instead of
+ * silently corrupting or dropping samples. Any sample that is nevertheless
+ * lost (SubCore lagging by more than IMU_RING_SIZE - 1 samples) is counted.
  */
 
 #if (SUBCORE != 1)
@@ -12,186 +19,179 @@
 
 #include <MP.h>
 #include "shared_types.h"
+#include "src/localizer/localizer.h"
 
-// Ring buffer for Gaussian filter
-static float measured_accel_x[LIST_SIZE];
-static float measured_accel_y[LIST_SIZE];
-static float measured_accel_z[LIST_SIZE];
-static float measured_gyro_x[LIST_SIZE];
-static float measured_gyro_y[LIST_SIZE];
-static float measured_gyro_z[LIST_SIZE];
-static int current_list_num = 0;
-static int old_timestamp = -1;
-static bool buffer_initialized = false;
+static_assert(MESUREMENT_FREQUENCY == LOCALIZER_SAMPLE_RATE, "sample rate mismatch");
 
-// Gaussian kernel (initialized once)
-static float kernel[LIST_SIZE];
-static bool kernel_initialized = false;
+#define OUTPUT_RING_SIZE 8
+#define OUTPUT_INTERVAL (MESUREMENT_FREQUENCY / OUTPUT_RATE_HZ)
+#define STATS_INTERVAL_MS 5000
+#define RECV_TIMEOUT_MS 100 // wake up even if a notification was lost
 
-// Statistics tracking
-static uint32_t loop_count = 0;
+static Localizer localizer;
+static const ImuRing_t *imu_ring = NULL;
+static uint32_t ring_tail = 0;
+static uint32_t ring_overruns = 0;
+
+// Output buffers are rings too so that MainCore can still be reading the
+// previous entry while the next one is written.
+static PositionData_t output_ring[OUTPUT_RING_SIZE];
+static uint32_t output_index = 0;
+static int output_divider = 0;
+
+static ProcessingStats_t stats_ring[2];
+static uint32_t stats_index = 0;
 static uint32_t last_stats_time = 0;
-static uint32_t stats_loop_count_start = 0;
-static uint32_t recv_error_count = 0;
-static uint32_t wrong_msgid_count = 0;
-static uint32_t send_error_count = 0;
+static uint32_t stats_samples_start = 0;
 
-void initializeKernel()
+// Per-sample processing time (window statistics)
+static uint32_t process_us_max = 0;
+static uint64_t process_us_sum = 0;
+static uint32_t process_count = 0;
+static uint32_t batch_max = 0;
+
+static void sendPosition(const LocalizerState &st)
 {
-  float sum = 0.0f;
-  for (int i = 0; i < LIST_SIZE; i++)
-  {
-    kernel[i] = (1.0f / (sqrt(2.0f * M_PI) * SIGMA_K)) *
-                exp(-(float)(i * i) / (2.0f * SIGMA_K * SIGMA_K));
-    sum += kernel[i];
-  }
-  // Normalize
-  for (int i = 0; i < LIST_SIZE; i++)
-  {
-    kernel[i] /= sum;
-  }
-  kernel_initialized = true;
+  PositionData_t &out = output_ring[output_index % OUTPUT_RING_SIZE];
+  output_index++;
+  out.timestamp = st.timestamp;
+  out.quaternion[0] = st.quaternion.w;
+  out.quaternion[1] = st.quaternion.x;
+  out.quaternion[2] = st.quaternion.y;
+  out.quaternion[3] = st.quaternion.z;
+  out.velocity[0] = st.velocity.x;
+  out.velocity[1] = st.velocity.y;
+  out.velocity[2] = st.velocity.z;
+  out.position[0] = st.position.x;
+  out.position[1] = st.position.y;
+  out.position[2] = st.position.z;
+  out.acceleration[0] = st.earthAccel.x;
+  out.acceleration[1] = st.earthAccel.y;
+  out.acceleration[2] = st.earthAccel.z;
+  out.gyro[0] = st.gyro.x;
+  out.gyro[1] = st.gyro.y;
+  out.gyro[2] = st.gyro.z;
+  out.temp = st.temp;
+  out.is_stationary = st.stationary;
+  MP.Send(MSG_ID_POSITION, &out, 0);
 }
 
-float applyCausalGaussianFilter(const float *x, int list_num)
+static void sendStats(uint32_t now)
 {
-  float y_current = 0.0f;
-  for (int i = 0; i < LIST_SIZE; i++)
+  ProcessingStats_t &s = stats_ring[stats_index % 2];
+  stats_index++;
+  const LocalizerDiagnostics &d = localizer.diagnostics();
+  s.core_id = SUBCORE_LOCALIZER;
+  s.phase = (localizer.phase() == Localizer::RUNNING) ? 1 : 0;
+  s.calibration_count = localizer.calibrationProgress();
+  s.calibration_required = localizer.calibrationRequired();
+  s.samples_processed = d.samplesProcessed;
+  s.ring_overruns = ring_overruns;
+  s.dt_anomalies = d.dtAnomalies;
+  const uint32_t elapsed_ms = now - last_stats_time;
+  s.actual_rate_hz = (elapsed_ms > 0) ? (d.samplesProcessed - stats_samples_start) * 1000.0f / elapsed_ms : 0.0f;
+  s.max_dt = d.maxDt;
+  s.max_process_us = process_us_max;
+  s.avg_process_us = (process_count > 0) ? (uint32_t)(process_us_sum / process_count) : 0;
+  s.max_batch = batch_max;
+  process_us_max = 0;
+  process_us_sum = 0;
+  process_count = 0;
+  batch_max = 0;
+  const Vec3 bias = localizer.accelBias();
+  s.accel_bias[0] = bias.x;
+  s.accel_bias[1] = bias.y;
+  s.accel_bias[2] = bias.z;
+  const Vec3 offset = localizer.alignment().gyroOffset;
+  s.gyro_offset[0] = offset.x;
+  s.gyro_offset[1] = offset.y;
+  s.gyro_offset[2] = offset.z;
+  MP.Send(MSG_ID_STATS, &s, 0);
+  stats_samples_start = d.samplesProcessed;
+  last_stats_time = now;
+}
+
+static void processSample(const ImuRawData_t &raw)
+{
+  const uint32_t t0 = micros();
+  ImuSample s;
+  s.timestamp = raw.timestamp;
+  s.temp = raw.temp;
+  s.accel = vec3(raw.ax, raw.ay, raw.az);
+  s.gyro = vec3(raw.gx, raw.gy, raw.gz);
+
+  const bool running = localizer.update(s);
+
+  const uint32_t us = micros() - t0;
+  if (us > process_us_max) process_us_max = us;
+  process_us_sum += us;
+  process_count++;
+
+  if (!running)
   {
-    int idx = LIST_SIZE - 1 - i;
-    int list_idx = (list_num + idx) % LIST_SIZE;
-    y_current += kernel[i] * x[list_idx];
+    return; // still calibrating
   }
-  return y_current;
+
+  if (++output_divider >= OUTPUT_INTERVAL)
+  {
+    output_divider = 0;
+    sendPosition(localizer.state());
+  }
 }
 
 void setup()
 {
-  // Initialize MP library
   MP.begin();
-
-  // Initialize Gaussian kernel
-  initializeKernel();
-
-  // Ring buffers will be initialized with first real data
-  // to avoid transient response from zero-filled buffers
-
-  // Set receive timeout to blocking mode for real-time processing
-  MP.RecvTimeout(MP_RECV_BLOCKING);
-
   last_stats_time = millis();
+}
 
-  // Send startup notification to MainCore
-  static ProcessingStats_t startup_stats;
-  startup_stats.core_id = 1;
-  startup_stats.loop_count = 0;
-  startup_stats.actual_rate_hz = 0.0f;
-  startup_stats.dropped_messages = 0;
-  MP.Send(MSG_ID_STATS, &startup_stats, 0);
+static void handleMessage(int8_t msgid, uint32_t msgdata)
+{
+  if (msgid == MSG_ID_RING_ADDR)
+  {
+    imu_ring = (const ImuRing_t *)msgdata;
+    ring_tail = imu_ring->head; // start with the samples that arrive from now on
+  }
+  // MSG_ID_IMU_AVAILABLE carries no information beyond "wake up"
 }
 
 void loop()
 {
   int8_t msgid;
-  ImuRawData_t *raw_data;
+  uint32_t msgdata;
 
-  // Wait for raw IMU data from MainCore
-  int ret = MP.Recv(&msgid, &raw_data);
-  if (ret < 0)
+  // Wait for a notification (or the timeout) ...
+  MP.RecvTimeout(RECV_TIMEOUT_MS);
+  if (MP.Recv(&msgid, &msgdata) > 0)
   {
-    recv_error_count++;
-    return;
+    handleMessage(msgid, msgdata);
+  }
+  // ... then consume every pending notification: the inter-core FIFO has
+  // only 8 receive buffers and PANICs when they are exhausted, so they
+  // must never be left queued while we process the ring.
+  MP.RecvTimeout(MP_RECV_POLLING);
+  while (MP.Recv(&msgid, &msgdata) > 0)
+  {
+    handleMessage(msgid, msgdata);
   }
 
-  if (msgid != MSG_ID_IMU_RAW)
+  if (imu_ring != NULL)
   {
-    wrong_msgid_count++;
-    return;
-  }
-
-  // Calculate dt from timestamp
-  float dt = 1.0f / MESUREMENT_FREQUENCY;
-  if (old_timestamp != -1)
-  {
-    if (raw_data->timestamp > (uint32_t)old_timestamp)
+    ImuRawData_t raw;
+    uint32_t batch = 0;
+    // Bounded so that the message queue above is serviced regularly even
+    // if the ring is being refilled as fast as it is drained.
+    while (batch < IMU_RING_SIZE && imu_ring_pop(imu_ring, &ring_tail, &raw, &ring_overruns) == 1)
     {
-      dt = (raw_data->timestamp - old_timestamp) / 19200000.0f;
+      processSample(raw);
+      batch++;
     }
-    else
-    {
-      // Handle timestamp overflow
-      uint32_t overflow_old = 0xFFFFFFFF - old_timestamp;
-      dt = (raw_data->timestamp + overflow_old) / 19200000.0f;
-    }
-  }
-  old_timestamp = raw_data->timestamp;
-
-  // Initialize ring buffer with first data sample to avoid zero transient
-  if (!buffer_initialized)
-  {
-    for (int i = 0; i < LIST_SIZE; i++)
-    {
-      measured_accel_x[i] = raw_data->ax;
-      measured_accel_y[i] = raw_data->ay;
-      measured_accel_z[i] = raw_data->az;
-      measured_gyro_x[i] = raw_data->gx;
-      measured_gyro_y[i] = raw_data->gy;
-      measured_gyro_z[i] = raw_data->gz;
-    }
-    buffer_initialized = true;
+    if (batch > batch_max) batch_max = batch;
   }
 
-  // Store raw data in ring buffer
-  measured_accel_x[current_list_num] = raw_data->ax;
-  measured_accel_y[current_list_num] = raw_data->ay;
-  measured_accel_z[current_list_num] = raw_data->az;
-  measured_gyro_x[current_list_num] = raw_data->gx;
-  measured_gyro_y[current_list_num] = raw_data->gy;
-  measured_gyro_z[current_list_num] = raw_data->gz;
-
-  // Apply Gaussian filter
-  static ImuFilteredData_t filtered_data;
-  filtered_data.timestamp = raw_data->timestamp;
-  filtered_data.temp = raw_data->temp;
-  filtered_data.ax = applyCausalGaussianFilter(measured_accel_x, current_list_num);
-  filtered_data.ay = applyCausalGaussianFilter(measured_accel_y, current_list_num);
-  filtered_data.az = applyCausalGaussianFilter(measured_accel_z, current_list_num);
-  filtered_data.gx = applyCausalGaussianFilter(measured_gyro_x, current_list_num);
-  filtered_data.gy = applyCausalGaussianFilter(measured_gyro_y, current_list_num);
-  filtered_data.gz = applyCausalGaussianFilter(measured_gyro_z, current_list_num);
-  filtered_data.dt = dt;
-
-  current_list_num = (current_list_num + 1) % LIST_SIZE;
-
-  // Update loop count
-  loop_count++;
-
-  // Send filtered data to MainCore
-  // Send every message to maintain processing rate
-  int send_ret = MP.Send(MSG_ID_FILTERED, &filtered_data, 0); // 0 = MainCore
-  if (send_ret < 0)
+  const uint32_t now = millis();
+  if (now - last_stats_time >= STATS_INTERVAL_MS)
   {
-    send_error_count++;
-  }
-
-  // Send statistics every 5 seconds
-  uint32_t current_time = millis();
-  if (current_time - last_stats_time >= 5000)
-  {
-    static ProcessingStats_t stats;
-    stats.core_id = 1;
-    stats.loop_count = loop_count;
-    stats.actual_rate_hz = (loop_count - stats_loop_count_start) / 5.0f;
-    stats.dropped_messages = recv_error_count + wrong_msgid_count + send_error_count;
-
-    MP.Send(MSG_ID_STATS, &stats, 0); // Send to MainCore
-
-    last_stats_time = current_time;
-    stats_loop_count_start = loop_count;
-
-    // Reset error counters after reporting
-    recv_error_count = 0;
-    wrong_msgid_count = 0;
-    send_error_count = 0;
+    sendStats(now);
   }
 }
