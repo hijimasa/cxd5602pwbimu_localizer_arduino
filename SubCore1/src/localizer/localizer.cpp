@@ -8,6 +8,7 @@ Localizer::Localizer()
 {
   earthRateCompensation_ = true;
   biasLearning_ = true;
+  gainScheduling_ = true;
   reset();
 }
 
@@ -33,6 +34,8 @@ void Localizer::reset()
       .recoveryTriggerPeriod = FUSION_RECOVERY_TRIGGER_PERIOD,
   };
   FusionAhrsSetSettings(&ahrs_, &settings);
+  currentGain_ = FUSION_AHRS_GAIN;
+  ambiguousCounter_ = 0;
 
   zupt_.reset();
   integrator_.reset();
@@ -109,6 +112,24 @@ void Localizer::startRunning(const ImuSample &sample)
   phase_ = RUNNING;
 }
 
+void Localizer::applyAhrsGain(float gain)
+{
+  if (gain == currentGain_)
+  {
+    return;
+  }
+  const FusionAhrsSettings settings = {
+      .convention = FusionConventionNwu,
+      .gain = gain,
+      .gyroscopeRange = FUSION_GYRO_RANGE,
+      .accelerationRejection = FUSION_ACCEL_REJECTION,
+      .magneticRejection = 0.0f,
+      .recoveryTriggerPeriod = FUSION_RECOVERY_TRIGGER_PERIOD,
+  };
+  FusionAhrsSetSettings(&ahrs_, &settings); // initialising is false: rampedGain = gain
+  currentGain_ = gain;
+}
+
 float Localizer::computeDt(uint32_t timestamp)
 {
   float dt = LOCALIZER_NOMINAL_DT;
@@ -177,8 +198,38 @@ void Localizer::processRunning(const ImuSample &sample)
   const Vec3 sensorAccel = vec3Sub(linearRaw, accelBias_);
   const Vec3 earthAccel = quatRotateSensorToEarth(q, sensorAccel);
 
-  // 6. ZUPT detection (variance based: gyro offset is irrelevant)
-  const bool stationary = zupt_.update(earthAccel, gyroF);
+  // 6. ZUPT detection on the corrected signals
+  const Vec3 gyroCorrected = vec3(gyroscope.axis.x * DEG_TO_RAD_F, gyroscope.axis.y * DEG_TO_RAD_F, gyroscope.axis.z * DEG_TO_RAD_F);
+  const bool stationary = zupt_.update(earthAccel, gyroCorrected, vec3Norm(integrator_.velocity()));
+
+  // 6b. AHRS gain scheduling for the next update
+  if (gainScheduling_)
+  {
+    if (stationary)
+    {
+      ambiguousCounter_ = 0;
+      applyAhrsGain(FUSION_GAIN_STATIONARY);
+    }
+    else if (!zupt_.isLowVariance())
+    {
+      ambiguousCounter_ = 0;
+      applyAhrsGain(FUSION_GAIN_MOTION);
+    }
+    else if (zupt_.isLowMean())
+    {
+      ambiguousCounter_ = 0;
+      applyAhrsGain(FUSION_GAIN_SETTLING);
+    }
+    else
+    {
+      // smooth sustained acceleration, or an attitude error at rest
+      if (ambiguousCounter_ < FUSION_AMBIGUOUS_TIMEOUT)
+      {
+        ambiguousCounter_++;
+      }
+      applyAhrsGain(ambiguousCounter_ >= FUSION_AMBIGUOUS_TIMEOUT ? FUSION_GAIN_SETTLING : FUSION_GAIN_MOTION);
+    }
+  }
 
   // 7. Accel bias learning while stationary (residual should be zero)
   if (stationary && biasLearning_)
@@ -195,7 +246,7 @@ void Localizer::processRunning(const ImuSample &sample)
   state_.position = integrator_.position();
   state_.earthAccel = earthAccel;
   state_.sensorAccel = sensorAccel;
-  state_.gyro = vec3(gyroscope.axis.x * DEG_TO_RAD_F, gyroscope.axis.y * DEG_TO_RAD_F, gyroscope.axis.z * DEG_TO_RAD_F);
+  state_.gyro = gyroCorrected;
   state_.dt = dt;
   state_.temp = sample.temp;
   state_.stationary = stationary;

@@ -13,7 +13,7 @@ struct RunResult
   float initialHeadingErrorDeg = 0.0f; // arbitrary unless north-finding is accurate
   float finalTiltErrorDeg = 0.0f;
   float finalHeadingDriftDeg = 0.0f;
-  float finalPositionError = 0.0f;
+  float finalPositionError = 0.0f; // in the initial-heading-aligned frame (see below)
   float maxSpeedErrorWhileStill = 0.0f;
   bool stationaryAtEnd = false;
   uint32_t runningSamples = 0;
@@ -33,6 +33,13 @@ static float headingErrorDeg(Quat est, Quat truth)
   Vec3 xt = quatRotateSensorToEarth(truth, vec3(1, 0, 0));
   xe.z = 0.0f; xt.z = 0.0f;
   return atan2f(vec3Cross(xt, xe).z, vec3Dot(xt, xe)) * DEG;
+}
+
+/** Rotate a vector about the Earth z axis by angle (deg). */
+static Vec3 rotateZ(Vec3 v, float deg)
+{
+  const float c = cosf(deg / DEG), s = sinf(deg / DEG);
+  return vec3(c * v.x - s * v.y, s * v.x + c * v.y, v.z);
 }
 
 static float wrapDeg(float a)
@@ -71,7 +78,10 @@ static RunResult runSimulation(Localizer &loc, const SimConfig &cfg, const Traje
     r.lastTruth = truth;
     r.finalTiltErrorDeg = tilt;
     r.finalHeadingDriftDeg = head;
-    r.finalPositionError = vec3Norm(vec3Sub(st.position, truth.position));
+    // Without a magnetometer the absolute heading is only as good as the
+    // gyro-compass alignment (gyro bias vs. earth rate). Position accuracy
+    // is therefore judged after removing the initial heading error.
+    r.finalPositionError = vec3Norm(vec3Sub(rotateZ(st.position, -r.initialHeadingErrorDeg), truth.position));
     r.stationaryAtEnd = st.stationary;
   }
   return r;
@@ -234,40 +244,99 @@ TEST(localizer_rotation_then_rest)
   CHECK_LT(r.finalPositionError, 0.05f);
 }
 
-TEST(localizer_smooth_translation_baseline_known_issue)
+static RunResult translationRun(Localizer &loc, double duration, float distance, double rest = 3.0)
 {
-  // 1 m along Earth X in 2 s with a minimum-jerk profile (peak ~1.4 m/s^2),
-  // then rest. The acceleration is so smooth that its variance over the
-  // 16-sample ZUPT window stays below the threshold: the detector reports
-  // "stationary" during the whole move and the motion is lost entirely.
-  // KNOWN ISSUE of the variance-only detector; the bound documents the
-  // current behaviour and must be tightened when the detector is improved.
-  Localizer loc;
-  const RunResult r = runSimulation(loc, realisticNoise(), translationTrajectory(LEVEL, 17.0, 2.0, vec3(1.0f, 0, 0)), 22.0);
-  METRIC("final position error (m)", r.finalPositionError);
-  METRIC("estimated x (m)", r.last.position.x);
-  CHECK(r.stationaryAtEnd);
-  CHECK_LT(r.finalPositionError, 1.05f);
+  return runSimulation(loc, realisticNoise(), translationTrajectory(LEVEL, 17.0, duration, vec3(distance, 0, 0)), 17.0 + duration + rest);
 }
 
-TEST(localizer_abrupt_translation_baseline_known_issue)
+TEST(localizer_smooth_translation_2s)
 {
-  // 0.3 m along Earth X in 0.5 s (peak ~6.9 m/s^2), then rest for 4 s.
-  // The start of the motion is detected, but around each acceleration
-  // extremum the signal is locally constant for > ZUPT_REQUIRED_SAMPLES, the
-  // variance drops below the threshold and the ZUPT zeroes the velocity in
-  // the middle of the move (~85 % of the displacement is lost).
-  // KNOWN ISSUE of the variance-only detector; the bound documents the
-  // current behaviour and must be tightened when the detector is improved.
+  // 1 m along Earth X in 2 s with a minimum-jerk profile (peak ~1.4 m/s^2).
+  // Around the mid point the acceleration is ~0 for ~0.1 s: the ZUPT must
+  // not fire there (speed-dependent confirmation time).
   Localizer loc;
-  const RunResult r = runSimulation(loc, realisticNoise(), translationTrajectory(LEVEL, 17.0, 0.5, vec3(0.3f, 0, 0)), 21.5);
+  const RunResult r = translationRun(loc, 2.0, 1.0f);
   METRIC("final position error (m)", r.finalPositionError);
-  METRIC("estimated x (m)", r.last.position.x);
+  METRIC("estimated distance (m)", vec3Norm(r.last.position));
   METRIC("max tilt error during run (deg)", r.maxTiltErrorDeg);
-  METRIC("stationary samples", r.stationarySamples);
+  CHECK(r.stationaryAtEnd);
+  CHECK_LT(r.finalPositionError, 0.06f);
+}
+
+TEST(localizer_slow_translation_4s)
+{
+  // 1 m in 4 s (peak ~0.36 m/s^2): close to the mean-acceleration threshold,
+  // with a ~0.4 s near-zero acceleration phase in the middle.
+  Localizer loc;
+  const RunResult r = translationRun(loc, 4.0, 1.0f);
+  METRIC("final position error (m)", r.finalPositionError);
+  METRIC("estimated distance (m)", vec3Norm(r.last.position));
+  CHECK(r.stationaryAtEnd);
+  CHECK_LT(r.finalPositionError, 0.25f);
+}
+
+TEST(localizer_abrupt_translation)
+{
+  // 0.3 m along Earth X in 0.5 s (peak ~6.9 m/s^2), then rest.
+  Localizer loc;
+  const RunResult r = translationRun(loc, 0.5, 0.3f);
+  METRIC("final position error (m)", r.finalPositionError);
+  METRIC("estimated distance (m)", vec3Norm(r.last.position));
+  METRIC("max tilt error during run (deg)", r.maxTiltErrorDeg);
   CHECK(r.stationaryAtEnd);
   CHECK_NEAR(r.last.velocity.x, 0.0f, 1e-6);
-  CHECK_LT(r.finalPositionError, 0.30f);
+  CHECK_LT(r.finalPositionError, 0.02f);
+}
+
+TEST(localizer_long_translation_3s_2m)
+{
+  Localizer loc;
+  const RunResult r = translationRun(loc, 3.0, 2.0f);
+  METRIC("final position error (m)", r.finalPositionError);
+  METRIC("estimated distance (m)", vec3Norm(r.last.position));
+  CHECK(r.stationaryAtEnd);
+  CHECK_LT(r.finalPositionError, 0.15f);
+}
+
+TEST(localizer_gain_scheduling_reduces_motion_tilt_error)
+{
+  // With a fixed gain the accelerometer feedback tilts the attitude towards
+  // the apparent gravity during translation; scheduling must reduce that.
+  Localizer with;
+  const RunResult a = translationRun(with, 2.0, 1.0f);
+  Localizer without;
+  without.setGainScheduling(false);
+  const RunResult b = translationRun(without, 2.0, 1.0f);
+  METRIC("max tilt error with scheduling (deg)", a.maxTiltErrorDeg);
+  METRIC("max tilt error without scheduling (deg)", b.maxTiltErrorDeg);
+  METRIC("position error with scheduling (m)", a.finalPositionError);
+  METRIC("position error without scheduling (m)", b.finalPositionError);
+  CHECK_LT(a.maxTiltErrorDeg * 2.0f, b.maxTiltErrorDeg);
+  CHECK_LT(a.finalPositionError, b.finalPositionError);
+}
+
+TEST(localizer_stop_is_confirmed_quickly)
+{
+  // After a genuine stop the estimated speed is small, so the fast
+  // confirmation applies: stationary within ~0.1 s after the motion ends.
+  Localizer loc;
+  SimConfig cfg = realisticNoise();
+  ImuSimulator sim(cfg);
+  const double t0 = 17.0, dur = 1.0;
+  const TrajectoryFn traj = translationTrajectory(LEVEL, t0, dur, vec3(0.5f, 0, 0));
+  double firstStationaryAfterStop = -1.0;
+  for (uint64_t k = 0; k < (uint64_t)(20.0 * LOCALIZER_SAMPLE_RATE); k++)
+  {
+    const double t = (double)k / LOCALIZER_SAMPLE_RATE;
+    if (!loc.update(sim.sample(k, traj))) continue;
+    if (t > t0 + dur && loc.state().stationary && firstStationaryAfterStop < 0)
+    {
+      firstStationaryAfterStop = t - (t0 + dur);
+    }
+  }
+  METRIC("stationary confirmed after stop (s)", firstStationaryAfterStop);
+  CHECK(firstStationaryAfterStop >= 0.0);
+  CHECK_LT(firstStationaryAfterStop, 0.15);
 }
 
 TEST(localizer_reset_returns_to_calibration)

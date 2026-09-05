@@ -33,7 +33,8 @@ IMU samples cross the core boundary through a 256-entry ring buffer (about 133 m
 - **Gyro-compass initial alignment:** Up from the mean accelerometer vector, North from the horizontal component of the mean angular rate; the initial quaternion matches the Fusion NWU convention
 - **Initial gyro offset and earth-rate compensation:** the mean angular rate minus the expected earth rotation seeds the gyro offset; while running, the earth rotation is continuously removed using the current attitude
 - **Fusion AHRS:** acceleration rejection and gravity removal
-- **Variance based ZUPT:** stationary detection from signal variance; velocity is reset while stationary
+- **ZUPT (variance + mean):** besides the signal variance, the window mean of acceleration and angular rate is checked, so a smooth acceleration is not mistaken for rest; while the estimated speed is large the confirmation period is extended to survive short constant-velocity phases
+- **AHRS gain scheduling:** high gain while stationary for fast convergence, low gain during motion so that linear acceleration does not tilt the attitude
 - **Accelerometer bias learning** while stationary
 - **Trapezoidal integration** of velocity and position
 - **Host-side unit tests** with synthetic IMU regression scenarios
@@ -176,17 +177,29 @@ cxd5602pwbimu_localizer_arduino/
 2. **Gaussian filter:** causal, σ = 2 samples, largest weight on the current sample
 3. **Earth-rate compensation:** the earth rotation vector is rotated into the sensor frame with the current attitude and subtracted from the angular rate
 4. **Gyro offset tracking:** FusionOffset, seeded with the alignment result
-5. **AHRS update:** Fusion (gain 0.1, acceleration rejection 10°)
+5. **AHRS update:** Fusion (acceleration rejection 10°, gain scheduled in 7b)
 6. **Gravity removal and bias correction** in the sensor frame, then rotation into the Earth frame
-7. **ZUPT:** stationary when the variance over a 16-sample window stays below the thresholds for 96 consecutive samples (50 ms); leaving is immediate
+7. **ZUPT:** stationary when, over a 16-sample window, the variance is below the thresholds and the mean acceleration is below 0.1 m/s² and the mean angular rate below 2 °/s, for 96 consecutive samples (50 ms). While the estimated speed exceeds 0.1 m/s, 1 s of continuous stillness is required instead (a short constant-velocity phase in the middle of a move must not be taken for a stop). Leaving is immediate
+7b. **Gain scheduling:** confirmed stationary → 0.5; moving (high variance, or large mean acceleration/rotation) → 0.02; low variance and low mean but not yet confirmed → 0.1. A "low variance but large mean acceleration" state lasting more than 2 s is assumed to be an attitude error at rest and falls back to 0.1
 8. **Bias learning:** while stationary, the residual acceleration is learned with a 1 s time constant
 9. **Integration:** trapezoidal velocity and position; velocity is reset to zero while stationary
 
-### Known issues (next improvement targets)
+### Current performance on synthetic data (`metric` lines of `cd test && make`)
 
-- **The variance-only ZUPT misclassifies smooth motion as stationary.** Wherever the acceleration is locally constant (constant velocity, acceleration extrema) the variance drops below the threshold and the velocity is zeroed in the middle of a move. The `known_issue` tests in `test/test_localizer.cpp` record the current behaviour
-- **The AHRS gain is fixed during motion**, so translational acceleration pulls the attitude estimate
-- **Gyro-compass accuracy depends on the gyro bias.** If the bias exceeds the horizontal earth rate (about 0.0034 °/s in Tokyo) the initial heading is arbitrary (relative positioning is unaffected)
+| Scenario | Position error |
+|---|---|
+| 0.3 m in 0.5 s (abrupt) | 0.6 mm |
+| 1 m in 2 s (smooth) | 2.7 cm |
+| 2 m in 3 s | 7.6 cm |
+| 1 m in 4 s (slow, peak 0.36 m/s²) | 15 cm |
+| 90° turn in place | 2.2 cm, attitude error 0.03° |
+
+### Known limitations (next improvement targets)
+
+- **Constant-velocity motion longer than 1 s is indistinguishable from rest.** This is inherent to a stand-alone IMU; shorter coasting phases are handled by the speed-dependent confirmation time
+- **Slow motion** with accelerations around 0.1 m/s² sits at the mean-acceleration threshold and comes out short
+- **Gyro-compass accuracy depends on the gyro bias.** If the bias exceeds the horizontal earth rate (about 0.0034 °/s in Tokyo) the initial heading is arbitrary (relative positioning is unaffected; the tests evaluate position error in the initial-heading-aligned frame)
+- **The velocity error observed at each ZUPT is not yet propagated back into the position** (next candidate)
 
 ## Configuration
 
@@ -198,10 +211,13 @@ Main parameters in `SubCore1/src/localizer/localizer_config.h`:
 | `LOCALIZER_GRAVITY` | 9.7975 m/s² | local gravity (Tokyo) |
 | `LOCALIZER_LATITUDE_DEG` | 35.68° | latitude for earth-rate compensation (Tokyo) |
 | `LOCALIZER_CALIBRATION_SECONDS` | 15 s | stationary calibration period at start-up |
-| `FUSION_AHRS_GAIN` | 0.1 | AHRS filter gain |
+| `FUSION_GAIN_STATIONARY` / `SETTLING` / `MOTION` | 0.5 / 0.1 / 0.02 | AHRS gain per state |
 | `FUSION_ACCEL_REJECTION` | 10.0° | acceleration rejection threshold |
 | `ZUPT_ACCEL_VARIANCE_THRESHOLD` | 0.004 (m/s²)² | ZUPT acceleration variance threshold |
 | `ZUPT_GYRO_VARIANCE_THRESHOLD` | 0.00006 (rad/s)² | ZUPT angular-rate variance threshold |
+| `ZUPT_ACCEL_MEAN_THRESHOLD` | 0.1 m/s² | ZUPT mean-acceleration threshold |
+| `ZUPT_GYRO_MEAN_THRESHOLD` | 2 °/s | ZUPT mean angular-rate threshold |
+| `ZUPT_SLOW_CONFIRM_SPEED` / `SAMPLES` | 0.1 m/s / 1 s | confirmation period while the estimated speed is large |
 | `IMU_RING_SIZE` (shared_types.h) | 256 | inter-core ring buffer length |
 | `IMU_NOTIFY_INTERVAL` (shared_types.h) | 8 | samples between wake-up notifications to SubCore1 (the receive FIFO has only 8 buffers) |
 

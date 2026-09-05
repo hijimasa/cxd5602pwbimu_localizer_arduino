@@ -2,96 +2,13 @@
 #include "localizer/zupt_detector.h"
 #include <random>
 
-// ---- Reference: original SubCore3 implementation (verbatim port) ----------
-namespace ref
-{
-#define ACCEL_VARIANCE_THRESHOLD ZUPT_ACCEL_VARIANCE_THRESHOLD
-#define GYRO_VARIANCE_THRESHOLD ZUPT_GYRO_VARIANCE_THRESHOLD
-#define REQUIRED_SAMPLES ZUPT_REQUIRED_SAMPLES
-#define MOTION_WINDOW_SIZE ZUPT_WINDOW_SIZE
-static int zero_velocity_counter = 0;
-static float accel_x_buffer[MOTION_WINDOW_SIZE];
-static float accel_y_buffer[MOTION_WINDOW_SIZE];
-static float accel_z_buffer[MOTION_WINDOW_SIZE];
-static float gyro_x_buffer[MOTION_WINDOW_SIZE];
-static float gyro_y_buffer[MOTION_WINDOW_SIZE];
-static float gyro_z_buffer[MOTION_WINDOW_SIZE];
-static int motion_buffer_idx = 0;
-static bool buffer_filled = false;
+static const int SETTLE = ZUPT_WINDOW_SIZE + ZUPT_REQUIRED_SAMPLES + 5;
 
-static void reset()
+static bool feedConstant(ZuptDetector &det, Vec3 a, Vec3 g, int n = SETTLE)
 {
-  zero_velocity_counter = 0;
-  motion_buffer_idx = 0;
-  buffer_filled = false;
-  for (int i = 0; i < MOTION_WINDOW_SIZE; i++)
-  {
-    accel_x_buffer[i] = accel_y_buffer[i] = accel_z_buffer[i] = 0.0f;
-    gyro_x_buffer[i] = gyro_y_buffer[i] = gyro_z_buffer[i] = 0.0f;
-  }
-}
-
-static float calculateVariance(const float *buffer, int size)
-{
-  float mean = 0.0f;
-  for (int i = 0; i < size; i++) mean += buffer[i];
-  mean /= size;
-  float variance = 0.0f;
-  for (int i = 0; i < size; i++)
-  {
-    float diff = buffer[i] - mean;
-    variance += diff * diff;
-  }
-  return variance / size;
-}
-
-static bool detectStationary(float ax, float ay, float az, float gx, float gy, float gz)
-{
-  accel_x_buffer[motion_buffer_idx] = ax;
-  accel_y_buffer[motion_buffer_idx] = ay;
-  accel_z_buffer[motion_buffer_idx] = az;
-  gyro_x_buffer[motion_buffer_idx] = gx;
-  gyro_y_buffer[motion_buffer_idx] = gy;
-  gyro_z_buffer[motion_buffer_idx] = gz;
-  motion_buffer_idx = (motion_buffer_idx + 1) % MOTION_WINDOW_SIZE;
-  if (motion_buffer_idx == 0) buffer_filled = true;
-  if (!buffer_filled) return false;
-  float total_accel_var = calculateVariance(accel_x_buffer, MOTION_WINDOW_SIZE) +
-                          calculateVariance(accel_y_buffer, MOTION_WINDOW_SIZE) +
-                          calculateVariance(accel_z_buffer, MOTION_WINDOW_SIZE);
-  float total_gyro_var = calculateVariance(gyro_x_buffer, MOTION_WINDOW_SIZE) +
-                         calculateVariance(gyro_y_buffer, MOTION_WINDOW_SIZE) +
-                         calculateVariance(gyro_z_buffer, MOTION_WINDOW_SIZE);
-  if (total_accel_var < ACCEL_VARIANCE_THRESHOLD && total_gyro_var < GYRO_VARIANCE_THRESHOLD)
-    zero_velocity_counter++;
-  else
-    zero_velocity_counter = 0;
-  return (zero_velocity_counter > REQUIRED_SAMPLES);
-}
-} // namespace ref
-
-TEST(zupt_matches_reference_implementation)
-{
-  std::mt19937 rng(5);
-  std::normal_distribution<float> n(0.0f, 1.0f);
-  ZuptDetector det;
-  ref::reset();
-  // alternate quiet and noisy segments so both branches are exercised
-  for (int i = 0; i < 20000; i++)
-  {
-    const bool quiet = ((i / 700) % 2) == 0;
-    const float sa = quiet ? 0.005f : 0.2f;
-    const float sg = quiet ? 0.0005f : 0.05f;
-    const Vec3 a = vec3(0.3f + n(rng) * sa, -0.1f + n(rng) * sa, n(rng) * sa);
-    const Vec3 g = vec3(0.01f + n(rng) * sg, n(rng) * sg, -0.02f + n(rng) * sg);
-    const bool expect = ref::detectStationary(a.x, a.y, a.z, g.x, g.y, g.z);
-    const bool got = det.update(a, g);
-    if (expect != got)
-    {
-      CHECK(expect == got);
-      break;
-    }
-  }
+  bool s = false;
+  for (int i = 0; i < n; i++) s = det.update(a, g);
+  return s;
 }
 
 TEST(zupt_declares_stationary_after_confirmation_period)
@@ -100,29 +17,92 @@ TEST(zupt_declares_stationary_after_confirmation_period)
   int firstStationary = -1;
   for (int i = 0; i < 400; i++)
   {
-    if (det.update(vec3(0.5f, 0.5f, 0.5f), vec3(0.1f, 0.1f, 0.1f)) && firstStationary < 0)
+    if (det.update(vec3(0.05f, 0.05f, 0.05f), vec3(0.001f, 0.001f, 0.001f)) && firstStationary < 0)
     {
       firstStationary = i;
     }
   }
-  // the first variance is computed when the window fills (index 15), so the
-  // counter strictly exceeds REQUIRED_SAMPLES at index 15 + REQUIRED_SAMPLES
+  // the first statistics are computed when the window fills (index 15), so
+  // the counter strictly exceeds REQUIRED_SAMPLES at index 15 + REQUIRED_SAMPLES
   CHECK(firstStationary == ZUPT_WINDOW_SIZE - 1 + ZUPT_REQUIRED_SAMPLES);
 }
 
-TEST(zupt_exits_immediately_on_motion)
+TEST(zupt_noisy_rest_is_stationary)
+{
+  std::mt19937 rng(5);
+  std::normal_distribution<float> n(0.0f, 1.0f);
+  ZuptDetector det;
+  bool s = false;
+  int stationaryCount = 0;
+  for (int i = 0; i < 4000; i++)
+  {
+    // residual bias 0.05 m/s^2 plus filtered-noise level scatter
+    const Vec3 a = vec3(0.03f + n(rng) * 0.005f, -0.04f + n(rng) * 0.005f, n(rng) * 0.005f);
+    const Vec3 g = vec3(n(rng) * 0.0005f, 0.002f + n(rng) * 0.0005f, n(rng) * 0.0005f);
+    s = det.update(a, g);
+    if (s) stationaryCount++;
+  }
+  CHECK(s);
+  CHECK_LT(4000 - SETTLE, stationaryCount + 1);
+}
+
+TEST(zupt_exits_immediately_on_vibration)
 {
   ZuptDetector det;
-  for (int i = 0; i < 400; i++) det.update(vec3Zero(), vec3Zero());
-  CHECK(det.isStationary());
+  CHECK(feedConstant(det, vec3Zero(), vec3Zero()));
   CHECK(!det.update(vec3(5.0f, 0.0f, 0.0f), vec3Zero()));
   CHECK(!det.isStationary());
 }
 
-TEST(zupt_gyro_offset_does_not_matter)
+TEST(zupt_constant_acceleration_is_motion)
+{
+  // Locally constant acceleration (extremum of a smooth move) has zero
+  // variance but must not be treated as rest.
+  ZuptDetector det;
+  CHECK(!feedConstant(det, vec3(1.0f, 0.0f, 0.0f), vec3Zero()));
+  CHECK(det.isLowVariance());
+  CHECK(!det.isStationary());
+  // just below the mean threshold it is rest
+  ZuptDetector det2;
+  CHECK(feedConstant(det2, vec3(0.9f * ZUPT_ACCEL_MEAN_THRESHOLD, 0.0f, 0.0f), vec3Zero()));
+  // just above it is motion
+  ZuptDetector det3;
+  CHECK(!feedConstant(det3, vec3(1.1f * ZUPT_ACCEL_MEAN_THRESHOLD, 0.0f, 0.0f), vec3Zero()));
+}
+
+TEST(zupt_constant_rotation_is_motion)
 {
   ZuptDetector det;
-  bool s = false;
-  for (int i = 0; i < 400; i++) s = det.update(vec3Zero(), vec3(1.0f, -2.0f, 0.5f));
-  CHECK(s);
+  CHECK(!feedConstant(det, vec3Zero(), vec3(0.0f, 0.0f, 1.5f * ZUPT_GYRO_MEAN_THRESHOLD)));
+  CHECK(det.isLowVariance());
+  ZuptDetector det2;
+  CHECK(feedConstant(det2, vec3Zero(), vec3(0.0f, 0.0f, 0.5f * ZUPT_GYRO_MEAN_THRESHOLD)));
+}
+
+TEST(zupt_mean_threshold_uses_vector_norm)
+{
+  // three axes each below the threshold but the norm above it -> motion
+  ZuptDetector det;
+  const float c = 0.7f * ZUPT_ACCEL_MEAN_THRESHOLD; // norm = 1.21 * threshold
+  CHECK(!feedConstant(det, vec3(c, c, c), vec3Zero()));
+}
+
+TEST(zupt_low_variance_flag_tracks_variance_only)
+{
+  ZuptDetector det;
+  feedConstant(det, vec3(2.0f, 0.0f, 0.0f), vec3Zero());
+  CHECK(det.isLowVariance());
+  CHECK(!det.isStationary());
+  det.update(vec3(2.0f, 3.0f, 0.0f), vec3Zero());
+  CHECK(!det.isLowVariance());
+}
+
+TEST(zupt_reset_clears_state)
+{
+  ZuptDetector det;
+  CHECK(feedConstant(det, vec3Zero(), vec3Zero()));
+  det.reset();
+  CHECK(!det.isStationary());
+  CHECK(!det.isLowVariance());
+  CHECK(!det.update(vec3Zero(), vec3Zero()));
 }

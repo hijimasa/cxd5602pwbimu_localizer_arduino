@@ -92,10 +92,17 @@ public:
   /** Enable/disable accel bias learning while stationary (enabled by default). */
   void setBiasLearning(bool enabled) { biasLearning_ = enabled; }
 
+  /** Enable/disable AHRS gain scheduling from the ZUPT state (enabled by default). */
+  void setGainScheduling(bool enabled) { gainScheduling_ = enabled; }
+
+  /** AHRS gain currently applied. */
+  float currentAhrsGain() const { return currentGain_; }
+
 private:
   void startRunning(const ImuSample &sample);
   float computeDt(uint32_t timestamp);
   void processRunning(const ImuSample &sample);
+  void applyAhrsGain(float gain);
 
   Phase phase_;
   InitialAlignment alignmentAccumulator_;
@@ -112,6 +119,9 @@ private:
   Vec3 earthRateNwu_;
   bool earthRateCompensation_;
   bool biasLearning_;
+  bool gainScheduling_;
+  float currentGain_;
+  uint32_t ambiguousCounter_; // samples in "low variance, large mean" state
 
   uint32_t lastTimestamp_;
   bool haveLastTimestamp_;
