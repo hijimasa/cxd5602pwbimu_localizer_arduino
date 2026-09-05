@@ -141,6 +141,16 @@ make run ARGS=localizer   # 名前に localizer を含むテストだけ実行
 
 起動時の静止較正で分かるのは重力方向の加速度バイアスだけで、それに直交する成分は姿勢に吸収されて観測できません。センサを大きく傾けたり手で持って動かしたりすると、その成分が水平方向の誤差として現れます。通常ビルドのままシリアルから対話的に6姿勢の較正ができ、結果はSPIフラッシュに保存されて次回起動から自動で使われます。
 
+付属のスクリプトを使うのが簡単です。接続からコマンド送信、結果の確認まで案内します。
+
+```bash
+python3 tools/calibrate_accel_bias.py /dev/ttyUSB0          # 対話的に6姿勢を較正
+python3 tools/calibrate_accel_bias.py /dev/ttyUSB0 --show   # 保存値の表示
+python3 tools/calibrate_accel_bias.py /dev/ttyUSB0 --erase  # 保存値の消去
+```
+
+シリアルモニタから手動で行う場合の手順：
+
 1. シリアルモニタ（115200 baud）で `C` を送る。位置出力が止まり、姿勢1の指示が出る
 2. 指示された向き（+Z上＝基板を水平に、−Z上＝裏返し、±X上・±Y上＝基板を縁で立てる）に置いて静止させ、`Y` を送る。3秒計測し、動いていれば同じ姿勢をやり直すよう求められる
 3. 6姿勢が終わると3軸のバイアスと残差が表示され、フラッシュに保存される。SubCore1は新しいバイアスで15秒の静止較正をやり直すので、そのまま静止させる
@@ -210,6 +220,7 @@ cxd5602pwbimu_localizer_arduino/
 ├── tools/
 │   ├── record_raw.py                     # 実機の生データ記録
 │   ├── analyze_replay.py                 # 再生CSVの区間解析
+│   ├── calibrate_accel_bias.py           # 6姿勢較正の対話スクリプト
 │   └── usb_reset_cp210x.py               # 固まったUSBシリアルブリッジの復旧
 └── Fusion/                               # Fusionライブラリ（サブモジュール）
 ```

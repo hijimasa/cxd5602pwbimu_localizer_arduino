@@ -141,6 +141,16 @@ Every scenario prints its current performance figures as `metric` lines. Tighten
 
 The stationary calibration at start-up can only observe the accelerometer bias along gravity; the components perpendicular to it are absorbed into the attitude and show up as horizontal errors once the sensor is tilted a lot or carried by hand. The normal build offers a guided six-orientation calibration over the serial port; the result is stored in the SPI flash and used automatically from the next boot on.
 
+The bundled script walks through the whole procedure:
+
+```bash
+python3 tools/calibrate_accel_bias.py /dev/ttyUSB0          # interactive six-orientation calibration
+python3 tools/calibrate_accel_bias.py /dev/ttyUSB0 --show   # print the stored preset
+python3 tools/calibrate_accel_bias.py /dev/ttyUSB0 --erase  # erase the stored preset
+```
+
+Doing it by hand from a serial monitor:
+
 1. Send `C` from the serial monitor (115200 baud). Position output pauses and the first orientation is requested
 2. Put the sensor in the requested orientation (+Z up = board flat, −Z up = upside down, ±X / ±Y up = board standing on an edge), keep it still and send `Y`. Three seconds are measured; if the sensor moved you are asked to repeat that orientation
 3. After six orientations the three-axis bias and the residual are printed and saved. SubCore1 restarts its 15 s stationary calibration with the new bias, so keep the sensor still
@@ -210,6 +220,7 @@ cxd5602pwbimu_localizer_arduino/
 ├── tools/
 │   ├── record_raw.py                     # record raw device data
 │   ├── analyze_replay.py                 # segment analysis of a replay CSV
+│   ├── calibrate_accel_bias.py           # interactive six-orientation calibration
 │   └── usb_reset_cp210x.py               # recover a locked-up USB-serial bridge
 └── Fusion/                               # Fusion library (submodule)
 ```
