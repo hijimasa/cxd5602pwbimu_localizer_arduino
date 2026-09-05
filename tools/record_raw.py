@@ -31,6 +31,7 @@ POS_SIZE = 76
 STATS_SIZE = 68
 SIZES = {0: IMU_SIZE, 1: POS_SIZE, 2: STATS_SIZE}
 TICKS_PER_SAMPLE = 19200000 // 1920
+CALIBRATION_SAMPLES = 15 * 1920  # LOCALIZER_CALIBRATION_SECONDS * LOCALIZER_SAMPLE_RATE
 
 
 def parse_frames(data):
@@ -118,11 +119,32 @@ def main():
     t0 = time.time()
     chunks = []
     total = 0
+    # Live progress: count IMU frames so the operator knows when the 15 s
+    # stationary calibration (28800 samples) is over and the sensor may move.
+    pending = b""
+    imu_seen = 0
+    announced = False
+    print("recording... keep the sensor still until 'calibration complete'", flush=True)
     while time.time() - t0 < args.seconds:
         d = ser.read(65536)
-        if d:
-            chunks.append(d)
-            total += len(d)
+        if not d:
+            continue
+        chunks.append(d)
+        total += len(d)
+        if not announced:
+            pending += d
+            consumed = 0
+            for t, _payload in parse_frames(pending):
+                consumed += 4 + SIZES[t]
+                if t == 0:
+                    imu_seen += 1
+            pending = pending[consumed:] if consumed else pending[-64:]
+            if imu_seen >= CALIBRATION_SAMPLES:
+                print(f"[{time.time() - t0:5.1f} s] calibration complete - you may move the sensor now", flush=True)
+                announced = True
+            elif imu_seen == 0 and time.time() - t0 > 6.0:
+                print("no frames yet after 6 s: is MainCore built with -DRAW_LOG_OUTPUT?", flush=True)
+                announced = True  # stop nagging
     ser.close()
     data = b"".join(chunks)
     with open(args.output, "wb") as f:

@@ -143,6 +143,10 @@ void setup()
 
   imu_ring_init(&g_imu_ring);
 
+  // LED0: calibrating (keep the sensor still), LED1: running
+  ledOn(LED0);
+  ledOff(LED1);
+
   // Start the processing core and hand it the ring buffer address.
   MP.begin(SUBCORE_LOCALIZER);
   MP.RecvTimeout(MP_RECV_POLLING);
@@ -174,6 +178,11 @@ static void handleSubCoreMessages()
   {
     if (msgid == MSG_ID_POSITION)
     {
+      if (g_output_count == 0)
+      {
+        ledOff(LED0);
+        ledOn(LED1); // first estimate: calibration finished
+      }
       printPosition((const PositionData_t *)msgdata);
       g_output_count++;
     }

@@ -86,6 +86,15 @@ public:
   uint32_t calibrationProgress() const { return alignmentAccumulator_.sampleCount(); }
   uint32_t calibrationRequired() const { return alignmentAccumulator_.requiredSamples(); }
 
+  /**
+   * Set the stationary calibration length (default LOCALIZER_CALIBRATION_SECONDS).
+   * Only meaningful while still CALIBRATING; the accumulator is reset.
+   */
+  void setCalibrationSeconds(float seconds)
+  {
+    alignmentAccumulator_.setRequiredSamples((uint32_t)(seconds * LOCALIZER_SAMPLE_RATE + 0.5f));
+  }
+
   /** Enable/disable earth rotation compensation (enabled by default). */
   void setEarthRateCompensation(bool enabled) { earthRateCompensation_ = enabled; }
 

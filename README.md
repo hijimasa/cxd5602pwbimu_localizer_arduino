@@ -156,6 +156,8 @@ cd test && make replay
 ./out/replay ../logs/desk_1m.bin --no-retro
 ```
 
+The calibration takes 15 s of samples after the board has booted, i.e. it ends about 18 s after the script was started. The script prints "calibration complete" once it has received the calibration samples, and the board shows LED0 while calibrating and LED1 while running. Moving during the calibration corrupts the initial attitude and gyro offset, so wait for that cue (a contaminated recording can sometimes be rescued by replaying with a shorter calibration, e.g. `--calib-seconds 13`).
+
 The replay prints the maximum deviation from the device's own estimate; since both run the same code it is normally 0 for the position and below 1e-5 for the quaternion (a device running an older firmware shows a difference).
 
 `tools/analyze_replay.py` tabulates a replay CSV into rest/motion segments with their displacements and the attitude change. The recordings in `test/data/` are also used by the regression tests (`test_recordings.cpp`), which check closure error and displacement ranges.
@@ -236,7 +238,9 @@ cxd5602pwbimu_localizer_arduino/
 | Test | Estimated displacement | Closure error |
 |---|---|---|
 | 30 cm on the desk and back (fast, up to 0.57 m/s) | 0.309 / 0.302 m | 4.5 mm |
+| 30 cm on the desk and back (2.5 s each way, up to 0.20 m/s) | 0.302 / 0.289 m | 3.3 mm |
 | 30 cm on the desk and back (slow, 4.5 s each way, up to 0.12 m/s) | 0.306 / 0.316 m (with correction) | 1.2 cm |
+| 30 cm on the desk and back (9 s each way, up to 0.05 m/s) | 0.326 / 0.32 m (with correction) | 9.5 mm |
 | Lift, carry 70 cm horizontally and 45 cm down while rotating ~90°, place, carry back | 0.75 m horizontal, 0.44 m down (with correction; 0.59 m horizontal without) | 1.0 cm |
 | Stationary 60 s (level, upside down, 30° tilt) | zero position drift | attitude change 0.000° |
 

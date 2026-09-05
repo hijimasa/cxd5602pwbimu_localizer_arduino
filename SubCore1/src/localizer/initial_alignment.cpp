@@ -56,6 +56,12 @@ InitialAlignment::InitialAlignment(uint32_t requiredSamples)
   reset();
 }
 
+void InitialAlignment::setRequiredSamples(uint32_t requiredSamples)
+{
+  required_ = requiredSamples;
+  reset();
+}
+
 void InitialAlignment::reset()
 {
   count_ = 0;

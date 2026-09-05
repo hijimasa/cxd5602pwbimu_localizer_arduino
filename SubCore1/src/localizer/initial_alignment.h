@@ -48,6 +48,9 @@ public:
 
   void reset();
 
+  /** Change the number of samples to accumulate (also resets). */
+  void setRequiredSamples(uint32_t requiredSamples);
+
   /** Add one sample. Returns true when the required number has been reached. */
   bool add(Vec3 accel, Vec3 gyro);
 

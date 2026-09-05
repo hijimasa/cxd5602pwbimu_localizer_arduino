@@ -3,8 +3,8 @@
  * @brief Replay a raw log recorded with tools/record_raw.py through the
  *        localizer on the host.
  *
- * Usage: replay LOG.bin [--csv OUT.csv] [--no-earth-rate] [--no-gain-schedule]
- *                       [--no-retro] [--no-bias-learning]
+ * Usage: replay LOG.bin [--csv OUT.csv] [--calib-seconds S] [--no-earth-rate]
+ *                       [--no-gain-schedule] [--no-retro] [--no-bias-learning]
  *
  * Prints run statistics and, if the log also contains the position frames
  * produced on the device, the maximum deviation between the device estimate
@@ -22,7 +22,7 @@ int main(int argc, char **argv)
 {
   if (argc < 2)
   {
-    std::fprintf(stderr, "usage: %s LOG.bin [--csv OUT.csv] [--no-earth-rate] [--no-gain-schedule] [--no-retro] [--no-bias-learning]\n", argv[0]);
+    std::fprintf(stderr, "usage: %s LOG.bin [--csv OUT.csv] [--calib-seconds S] [--no-earth-rate] [--no-gain-schedule] [--no-retro] [--no-bias-learning]\n", argv[0]);
     return 2;
   }
   const char *csvPath = nullptr;
@@ -30,6 +30,7 @@ int main(int argc, char **argv)
   for (int i = 2; i < argc; i++)
   {
     if (!std::strcmp(argv[i], "--csv") && i + 1 < argc) csvPath = argv[++i];
+    else if (!std::strcmp(argv[i], "--calib-seconds") && i + 1 < argc) loc.setCalibrationSeconds((float)std::atof(argv[++i]));
     else if (!std::strcmp(argv[i], "--no-earth-rate")) loc.setEarthRateCompensation(false);
     else if (!std::strcmp(argv[i], "--no-gain-schedule")) loc.setGainScheduling(false);
     else if (!std::strcmp(argv[i], "--no-retro")) loc.setRetroactiveCorrection(false);
