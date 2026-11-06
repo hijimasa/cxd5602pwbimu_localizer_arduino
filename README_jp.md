@@ -62,7 +62,15 @@
    git submodule update --init
    ```
 
-   Fusionライブラリはサブモジュールで取得し、`SubCore1/src/Fusion` からシンボリックリンクで参照しています。
+   Fusionライブラリはサブモジュールで取得し、`SubCore1/src/Fusion` からシンボリックリンクで参照しています。両コアで共有するヘッダ（`shared_types.h`、`vec_math.h`、`accel_bias_fit.h`、`gyro_bias_fit.h`、`localizer_config.h`）もシンボリックリンクです。
+
+   **Windows の場合:** git はシンボリックリンクが有効なときだけ本物のリンクを作ります。無効だとリンク先のパスが書かれた小さなテキストファイルとして取り出され、ヘッダが見つからずビルドに失敗します。「開発者モード」（設定 > システム > 開発者向け）を有効にすると管理者権限なしでリンクを作れるようになるので、その上でリンクを有効にしてクローンしてください：
+
+   ```powershell
+   git clone -c core.symlinks=true --recursive https://github.com/hijimasa/cxd5602pwbimu_localizer_arduino.git
+   ```
+
+   この方法で本物のリンクが作られ、arduino-cli と Arduino IDE がそれを辿ってビルド・書き込みまでネイティブで行えることを確認しています（シリアルポートは IDE も Python ツールも `COMx` を指定）。このオプションなしで取り出したものは後から設定を変えても直らないので、クローンし直してください。ホスト側のテスト（make と g++）は WSL か MSYS2 が必要です。WSL でビルドと書き込みをすることもできますが、その場合は usbipd-win で USB シリアルブリッジを WSL にアタッチする必要があります。
 
 2. **Spresense Arduino ボードパッケージのインストール:**
 
@@ -350,6 +358,7 @@ RVizでTFとPoseディスプレイを追加することで、センサデータ�
 
 3. **コンパイルエラー:**
    - `git submodule update --init` を実行済みか確認（`SubCore1/src/Fusion` がサブモジュールを指します）
+   - Windows ではシンボリックリンクが本物か確認してください。`SubCore1/src/Fusion` がテキストファイルではなくフォルダであれば正常です。違う場合は開発者モードを有効にして `git clone -c core.symlinks=true --recursive` でクローンし直してください（インストールの項を参照）
    - Spresenseボードパッケージが正しくインストールされていることを確認
    - ツールメニューで正しいコアが選択されていることを確認
 

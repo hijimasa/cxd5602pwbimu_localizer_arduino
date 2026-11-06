@@ -62,7 +62,15 @@ IMU samples cross the core boundary through a 256-entry ring buffer (about 133 m
    git submodule update --init
    ```
 
-   The Fusion library is a submodule, referenced from `SubCore1/src/Fusion` through a symbolic link.
+   The Fusion library is a submodule, referenced from `SubCore1/src/Fusion` through a symbolic link. The headers shared by both cores (`shared_types.h`, `vec_math.h`, `accel_bias_fit.h`, `gyro_bias_fit.h`, `localizer_config.h`) are symbolic links as well.
+
+   **Windows:** git creates these links only when symbolic links are enabled; otherwise it checks out small text files containing the link targets and the build fails with missing-header errors. Turn on *Developer Mode* (Settings > System > For developers), which allows creating symbolic links without administrator rights, and clone with links enabled:
+
+   ```powershell
+   git clone -c core.symlinks=true --recursive https://github.com/hijimasa/cxd5602pwbimu_localizer_arduino.git
+   ```
+
+   Cloning this way has been confirmed to produce real links that arduino-cli and the Arduino IDE follow, so everything builds and uploads natively (the serial port is `COMx` for the IDE and the Python tools). A checkout made without this option cannot be repaired by changing the setting afterwards; clone again. The host tests (`make`, g++) need WSL or MSYS2; WSL can also build and upload, but then the USB-serial bridge has to be attached to WSL with usbipd-win.
 
 2. **Install the Spresense board package:**
 
@@ -346,6 +354,7 @@ Add TF and Pose displays in RViz to visualize the sensor data.
 
 3. **Compile errors:**
    - Run `git submodule update --init` (`SubCore1/src/Fusion` points into the submodule)
+   - On Windows, check that the symbolic links are real: `SubCore1/src/Fusion` must be a folder, not a text file. If not, clone again with `git clone -c core.symlinks=true --recursive` after enabling Developer Mode (see Installation)
    - Check that the Spresense board package is installed
    - Check that the correct core is selected in the Tools menu
 
