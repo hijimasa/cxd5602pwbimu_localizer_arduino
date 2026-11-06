@@ -10,6 +10,8 @@ Localizer::Localizer()
   biasLearning_ = true;
   gainScheduling_ = true;
   accelBiasPreset_ = vec3Zero(); // survives reset(): it is a device constant
+  gyroBiasPreset_ = vec3Zero();
+  hasGyroBiasPreset_ = false;
   reset();
 }
 
@@ -89,7 +91,8 @@ bool Localizer::update(const ImuSample &rawSample)
 
 void Localizer::startRunning(const ImuSample &sample)
 {
-  alignment_ = alignmentAccumulator_.compute(LOCALIZER_GRAVITY, LOCALIZER_LATITUDE_DEG, LOCALIZER_EARTH_RATE);
+  alignment_ = alignmentAccumulator_.compute(LOCALIZER_GRAVITY, LOCALIZER_LATITUDE_DEG, LOCALIZER_EARTH_RATE,
+                                             hasGyroBiasPreset_ ? &gyroBiasPreset_ : 0);
 
   // Seed the AHRS with the aligned attitude and skip Fusion's own
   // initialisation ramp (the attitude is already known).

@@ -16,6 +16,44 @@
 
 #define ACCEL_BIAS_FIT_MAX_ORIENTATIONS 8
 
+/**
+ * Solve the n x n system a x = y (n <= 4) by Gaussian elimination with
+ * partial pivoting. Fails when a pivot is smaller than minPivot, which for
+ * the normal equations of the orientation fits means that the orientations
+ * do not span all three axes.
+ */
+static inline bool biasFitSolveLinear(int n, const float a[4][4], const float y[4], float x[4], float minPivot)
+{
+  float m[4][5];
+  for (int i = 0; i < n; i++)
+  {
+    for (int j = 0; j < n; j++) m[i][j] = a[i][j];
+    m[i][n] = y[i];
+  }
+  for (int c = 0; c < n; c++)
+  {
+    int piv = c;
+    for (int r = c + 1; r < n; r++)
+      if (fabsf(m[r][c]) > fabsf(m[piv][c])) piv = r;
+    if (fabsf(m[piv][c]) < minPivot) return false;
+    if (piv != c)
+      for (int j = 0; j <= n; j++)
+      {
+        const float t = m[c][j];
+        m[c][j] = m[piv][j];
+        m[piv][j] = t;
+      }
+    for (int r = 0; r < n; r++)
+    {
+      if (r == c) continue;
+      const float f = m[r][c] / m[c][c];
+      for (int j = c; j <= n; j++) m[r][j] -= f * m[c][j];
+    }
+  }
+  for (int i = 0; i < n; i++) x[i] = m[i][n] / m[i][i];
+  return true;
+}
+
 class AccelBiasFit
 {
 public:
@@ -46,8 +84,8 @@ public:
     Vec3 b = vec3Zero();
     for (int iter = 0; iter < 30; iter++)
     {
-      float jtj[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
-      float jtr[3] = {0, 0, 0};
+      float jtj[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+      float jtr[4] = {0, 0, 0, 0};
       for (int i = 0; i < count_; i++)
       {
         const Vec3 d = vec3Sub(means_[i], b);
@@ -61,8 +99,9 @@ public:
           for (int q = 0; q < 3; q++) jtj[p][q] += j[p] * j[q];
         }
       }
-      float step[3];
-      if (!solve3x3(jtj, jtr, step)) return false; // degenerate orientations
+      float step[4];
+      // pivot threshold: two well separated orientations per axis give >= 1
+      if (!biasFitSolveLinear(3, jtj, jtr, step, 0.05f)) return false; // degenerate orientations
       b = vec3Sub(b, vec3(step[0], step[1], step[2]));
       if (fabsf(step[0]) + fabsf(step[1]) + fabsf(step[2]) < 1e-7f) break;
     }
@@ -81,39 +120,6 @@ public:
   }
 
 private:
-  /** Gaussian elimination with partial pivoting; fails on a small pivot. */
-  static bool solve3x3(float a[3][3], const float y[3], float x[3])
-  {
-    float m[3][4];
-    for (int i = 0; i < 3; i++)
-    {
-      for (int j = 0; j < 3; j++) m[i][j] = a[i][j];
-      m[i][3] = y[i];
-    }
-    for (int c = 0; c < 3; c++)
-    {
-      int piv = c;
-      for (int r = c + 1; r < 3; r++)
-        if (fabsf(m[r][c]) > fabsf(m[piv][c])) piv = r;
-      if (fabsf(m[piv][c]) < 0.05f) return false; // ~ two well separated orientations per axis give >= 1
-      if (piv != c)
-        for (int j = 0; j < 4; j++)
-        {
-          const float t = m[c][j];
-          m[c][j] = m[piv][j];
-          m[piv][j] = t;
-        }
-      for (int r = 0; r < 3; r++)
-      {
-        if (r == c) continue;
-        const float f = m[r][c] / m[c][c];
-        for (int j = c; j < 4; j++) m[r][j] -= f * m[c][j];
-      }
-    }
-    for (int i = 0; i < 3; i++) x[i] = m[i][3] / m[i][i];
-    return true;
-  }
-
   Vec3 means_[ACCEL_BIAS_FIT_MAX_ORIENTATIONS];
   int count_;
 };

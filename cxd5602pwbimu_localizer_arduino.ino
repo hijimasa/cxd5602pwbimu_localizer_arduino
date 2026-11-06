@@ -12,13 +12,13 @@
  * that a stall on one side never corrupts or silently drops samples.
  *
  * Serial commands (one letter, optional newline, normal build only):
- *   C  start the accelerometer bias calibration (six orientations, guided)
+ *   C  start the six-orientation calibration (accelerometer and gyro bias, guided)
  *   Y  confirm the current orientation during the calibration
  *   Q  abort the calibration
- *   P  print the stored accelerometer bias preset
+ *   P  print the stored calibration preset
  *   X  erase the stored preset and restart the localizer
  *   R  restart the localizer (15 s stationary calibration)
- * The preset is stored in the SPI flash (ACCEL_BIAS_FILE) and loaded at boot.
+ * The preset is stored in the SPI flash (PRESET_FILE) and loaded at boot.
  */
 
 #ifdef SUBCORE
@@ -29,6 +29,7 @@
 // #define RAW_LOG_OUTPUT   // binary raw IMU + position frames at RAW_LOG_BAUD (for test/replay)
 
 #include <stdio.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <fcntl.h>
 #include <nuttx/sensors/cxd5602pwbimu.h>
@@ -39,9 +40,10 @@
 #include <Flash.h>
 
 #include "shared_types.h"
+#include "localizer_config.h" // gravity, latitude, earth rate (link into SubCore1/src/localizer/)
 #include "vec_math.h"
 #include "accel_bias_fit.h"
-#define LOCALIZER_GRAVITY_MAINCORE 9.7975f // must match LOCALIZER_GRAVITY in localizer_config.h
+#include "gyro_bias_fit.h"
 
 #define CXD5602PWBIMU_DEVPATH "/dev/imu0"
 #define MAX_NFIFO (1)
@@ -55,14 +57,19 @@ static ImuRing_t g_imu_ring;
 static ProcessingStats_t g_stats;
 static bool g_stats_valid = false;
 
-// ---- Accelerometer bias preset (flash) and guided calibration ------------
-#define ACCEL_BIAS_FILE "accel_bias.txt"
+// ---- Calibration preset (flash) and guided six-orientation calibration ---
+// "accel_bias ax ay az" (m/s^2), "gyro_bias gx gy gz" (rad/s), "temperature t"
+#define PRESET_FILE "calibration.txt"
+// accelerometer-only file written by earlier firmware: "ax ay az"
+#define LEGACY_PRESET_FILE "accel_bias.txt"
 #define CALIB_ORIENTATIONS 6
-#define CALIB_SAMPLES_PER_ORIENTATION (MESUREMENT_FREQUENCY * 3) // 3 s
-#define CALIB_MAX_GYRO_DEG_S 1.0f                                // stillness check
-#define CALIB_MAX_ACCEL_STD 0.05f                                // m/s^2
+#define CALIB_SECONDS_PER_ORIENTATION 10
+#define CALIB_SAMPLES_PER_ORIENTATION (MESUREMENT_FREQUENCY * CALIB_SECONDS_PER_ORIENTATION)
+#define CALIB_MAX_GYRO_DEG_S 1.0f  // stillness check
+#define CALIB_MAX_ACCEL_STD 0.05f  // m/s^2
+#define RAD_TO_DEG_PER_HOUR (57.2958f * 3600.0f)
 
-static AccelBiasPreset_t g_preset; // shared with SubCore1 by pointer: keep static
+static CalibrationPreset_t g_preset; // shared with SubCore1 by pointer: keep static
 static const char *const CALIB_ORIENTATION_NAMES[CALIB_ORIENTATIONS] = {
     "+Z up (board flat, components up)",
     "-Z up (board upside down)",
@@ -80,8 +87,12 @@ enum CalibState
 static CalibState g_calib_state = CALIB_IDLE;
 static int g_calib_index = 0;
 static AccelBiasFit g_calib_fit;
+static GyroBiasFit g_calib_gyro_fit;
 static double g_calib_sum[3];
 static double g_calib_sumsq[3];
+static double g_calib_gyro_sum[3];
+static double g_calib_temp_sum = 0.0;       // current orientation
+static float g_calib_temp_mean_sum = 0.0f;  // sum of the per-orientation means
 static uint32_t g_calib_count = 0;
 static float g_calib_max_gyro = 0.0f;
 static uint32_t g_output_count = 0;
@@ -182,51 +193,94 @@ static void sendPreset()
 {
   markRestart();
   int retry = 0;
-  while (MP.Send(MSG_ID_ACCEL_BIAS, &g_preset, SUBCORE_LOCALIZER) < 0 && retry++ < 100)
+  while (MP.Send(MSG_ID_PRESET, &g_preset, SUBCORE_LOCALIZER) < 0 && retry++ < 100)
   {
     delay(10);
   }
 }
 
-static bool loadPreset()
+static void clearPreset()
 {
-  g_preset.valid = 0;
-  g_preset.bias[0] = g_preset.bias[1] = g_preset.bias[2] = 0.0f;
-  File f = Flash.open(ACCEL_BIAS_FILE, FILE_READ);
+  memset(&g_preset, 0, sizeof(g_preset));
+}
+
+static bool readTextFile(const char *name, char *buf, size_t size)
+{
+  File f = Flash.open(name, FILE_READ);
   if (!f)
   {
     return false;
   }
-  char line[96];
   size_t n = 0;
-  while (f.available() && n < sizeof(line) - 1)
+  while (f.available() && n < size - 1)
   {
-    line[n++] = (char)f.read();
+    buf[n++] = (char)f.read();
   }
-  line[n] = '\0';
+  buf[n] = '\0';
   f.close();
-  float b[3];
-  if (sscanf(line, "%f %f %f", &b[0], &b[1], &b[2]) == 3)
+  return true;
+}
+
+static bool loadPreset()
+{
+  clearPreset();
+  char text[256];
+  if (readTextFile(PRESET_FILE, text, sizeof(text)))
   {
-    g_preset.bias[0] = b[0];
-    g_preset.bias[1] = b[1];
-    g_preset.bias[2] = b[2];
-    g_preset.valid = 1;
-    return true;
+    float a[3], g[3], t;
+    const char *line = strstr(text, "accel_bias ");
+    if (line && sscanf(line, "accel_bias %f %f %f", &a[0], &a[1], &a[2]) == 3)
+    {
+      for (int i = 0; i < 3; i++) g_preset.accel_bias[i] = a[i];
+      g_preset.accel_valid = 1;
+    }
+    line = strstr(text, "gyro_bias ");
+    if (line && sscanf(line, "gyro_bias %f %f %f", &g[0], &g[1], &g[2]) == 3)
+    {
+      for (int i = 0; i < 3; i++) g_preset.gyro_bias[i] = g[i];
+      g_preset.gyro_valid = 1;
+    }
+    line = strstr(text, "temperature ");
+    if (line && sscanf(line, "temperature %f", &t) == 1)
+    {
+      g_preset.temperature = t;
+    }
+    return g_preset.accel_valid || g_preset.gyro_valid;
+  }
+  if (readTextFile(LEGACY_PRESET_FILE, text, sizeof(text)))
+  {
+    float a[3];
+    if (sscanf(text, "%f %f %f", &a[0], &a[1], &a[2]) == 3)
+    {
+      for (int i = 0; i < 3; i++) g_preset.accel_bias[i] = a[i];
+      g_preset.accel_valid = 1;
+      return true;
+    }
   }
   return false;
 }
 
 static bool savePreset()
 {
-  Flash.remove(ACCEL_BIAS_FILE);
-  File f = Flash.open(ACCEL_BIAS_FILE, FILE_WRITE);
+  Flash.remove(PRESET_FILE);
+  Flash.remove(LEGACY_PRESET_FILE);
+  File f = Flash.open(PRESET_FILE, FILE_WRITE);
   if (!f)
   {
     return false;
   }
   char line[96];
-  snprintf(line, sizeof(line), "%.6f %.6f %.6f\n", g_preset.bias[0], g_preset.bias[1], g_preset.bias[2]);
+  if (g_preset.accel_valid)
+  {
+    snprintf(line, sizeof(line), "accel_bias %.6f %.6f %.6f\n", g_preset.accel_bias[0], g_preset.accel_bias[1], g_preset.accel_bias[2]);
+    f.print(line);
+  }
+  if (g_preset.gyro_valid)
+  {
+    snprintf(line, sizeof(line), "gyro_bias %.8f %.8f %.8f\n", g_preset.gyro_bias[0], g_preset.gyro_bias[1], g_preset.gyro_bias[2]);
+    f.print(line);
+  }
+  snprintf(line, sizeof(line), "temperature %.2f\n", g_preset.temperature);
   f.print(line);
   f.close();
   return true;
@@ -234,14 +288,26 @@ static bool savePreset()
 
 static void printPreset()
 {
-  if (g_preset.valid)
+  if (!g_preset.accel_valid && !g_preset.gyro_valid)
   {
-    Serial.printf("# accel bias preset: [%.4f %.4f %.4f] m/s^2\n", g_preset.bias[0], g_preset.bias[1], g_preset.bias[2]);
+    Serial.println("# preset: none (send C to calibrate)");
+    return;
+  }
+  Serial.print("# preset:");
+  if (g_preset.accel_valid)
+  {
+    Serial.printf(" accel bias [%.4f %.4f %.4f] m/s^2", g_preset.accel_bias[0], g_preset.accel_bias[1], g_preset.accel_bias[2]);
+  }
+  if (g_preset.gyro_valid)
+  {
+    Serial.printf("%s gyro bias [%.5f %.5f %.5f] deg/s", g_preset.accel_valid ? "," : "",
+                  g_preset.gyro_bias[0] * 57.2958f, g_preset.gyro_bias[1] * 57.2958f, g_preset.gyro_bias[2] * 57.2958f);
   }
   else
   {
-    Serial.println("# accel bias preset: none (send C to calibrate)");
+    Serial.print(", gyro bias: none");
   }
+  Serial.printf(", calibrated at %.1f C\n", g_preset.temperature);
 }
 
 static void calibPrompt()
@@ -254,8 +320,11 @@ static void calibPrompt()
 static void calibStart()
 {
   g_calib_fit.reset();
+  g_calib_gyro_fit.reset();
+  g_calib_temp_mean_sum = 0.0f;
   g_calib_index = 0;
-  Serial.println("# accelerometer bias calibration: six orientations, 3 s each. Output is paused.");
+  Serial.printf("# bias calibration (accelerometer and gyroscope): six orientations, %d s each. Output is paused.\n",
+                CALIB_SECONDS_PER_ORIENTATION);
   calibPrompt();
 }
 
@@ -265,7 +334,9 @@ static void calibBeginMeasure()
   {
     g_calib_sum[i] = 0.0;
     g_calib_sumsq[i] = 0.0;
+    g_calib_gyro_sum[i] = 0.0;
   }
+  g_calib_temp_sum = 0.0;
   g_calib_count = 0;
   g_calib_max_gyro = 0.0f;
   g_calib_state = CALIB_MEASURING;
@@ -282,18 +353,48 @@ static void calibFinish()
 {
   Vec3 bias;
   float rms = 0.0f;
-  if (!g_calib_fit.solve(LOCALIZER_GRAVITY_MAINCORE, bias, &rms))
+  if (!g_calib_fit.solve(LOCALIZER_GRAVITY, bias, &rms))
   {
     calibAbort("orientations not diverse enough to solve for the bias");
     return;
   }
-  g_preset.bias[0] = bias.x;
-  g_preset.bias[1] = bias.y;
-  g_preset.bias[2] = bias.z;
-  g_preset.valid = 1;
+  // The gyro fit uses the same Up directions (after removing the accel bias)
+  // and the vertical earth rate for the configured latitude.
+  Vec3 gyroBias = vec3Zero();
+  float gyroRms = 0.0f, verticalRate = 0.0f;
+  const bool gyroOk = g_calib_gyro_fit.solve(bias, LOCALIZER_LATITUDE_DEG, LOCALIZER_EARTH_RATE, gyroBias, &gyroRms);
+  const bool verticalOk = gyroOk && g_calib_gyro_fit.estimateVerticalRate(bias, verticalRate);
+
+  g_preset.accel_bias[0] = bias.x;
+  g_preset.accel_bias[1] = bias.y;
+  g_preset.accel_bias[2] = bias.z;
+  g_preset.accel_valid = 1;
+  g_preset.gyro_bias[0] = gyroBias.x;
+  g_preset.gyro_bias[1] = gyroBias.y;
+  g_preset.gyro_bias[2] = gyroBias.z;
+  g_preset.gyro_valid = gyroOk ? 1 : 0;
+  g_preset.temperature = g_calib_temp_mean_sum / CALIB_ORIENTATIONS;
   const bool saved = savePreset();
-  Serial.printf("# result: bias [%.4f %.4f %.4f] m/s^2, rms residual %.4f m/s^2, %s\n",
-                bias.x, bias.y, bias.z, rms, saved ? "saved to flash" : "FAILED to save to flash");
+
+  Serial.printf("# result: accel bias [%.4f %.4f %.4f] m/s^2 (rms residual %.4f)", bias.x, bias.y, bias.z, rms);
+  if (gyroOk)
+  {
+    Serial.printf(", gyro bias [%.5f %.5f %.5f] deg/s (rms residual %.5f)",
+                  gyroBias.x * 57.2958f, gyroBias.y * 57.2958f, gyroBias.z * 57.2958f, gyroRms * 57.2958f);
+  }
+  else
+  {
+    Serial.print(", gyro bias not determined");
+  }
+  Serial.printf(", at %.1f C, %s\n", g_preset.temperature, saved ? "saved to flash" : "FAILED to save to flash");
+  if (verticalOk)
+  {
+    // Sanity check of the earth-rotation model: should match the latitude.
+    Serial.printf("# vertical earth rate seen by the gyro: %.1f deg/h (expected %.1f deg/h at %.2f deg latitude)\n",
+                  verticalRate * RAD_TO_DEG_PER_HOUR,
+                  GyroBiasFit::verticalRate(LOCALIZER_LATITUDE_DEG, LOCALIZER_EARTH_RATE) * RAD_TO_DEG_PER_HOUR,
+                  LOCALIZER_LATITUDE_DEG);
+  }
   sendPreset(); // SubCore1 restarts its 15 s stationary calibration
   Serial.println("# localizer restarting: keep the sensor still for 15 s");
   g_calib_state = CALIB_IDLE;
@@ -309,15 +410,20 @@ static void calibFeedSample(const ImuRawData_t &s)
   g_calib_sumsq[0] += (double)s.ax * s.ax;
   g_calib_sumsq[1] += (double)s.ay * s.ay;
   g_calib_sumsq[2] += (double)s.az * s.az;
+  g_calib_gyro_sum[0] += s.gx;
+  g_calib_gyro_sum[1] += s.gy;
+  g_calib_gyro_sum[2] += s.gz;
+  g_calib_temp_sum += s.temp;
   g_calib_count++;
   if (g_calib_count < (uint32_t)CALIB_SAMPLES_PER_ORIENTATION)
   {
     return;
   }
-  float mean[3], maxStd = 0.0f;
+  float mean[3], gyroMean[3], maxStd = 0.0f;
   for (int i = 0; i < 3; i++)
   {
     mean[i] = (float)(g_calib_sum[i] / g_calib_count);
+    gyroMean[i] = (float)(g_calib_gyro_sum[i] / g_calib_count);
     const float var = (float)(g_calib_sumsq[i] / g_calib_count) - mean[i] * mean[i];
     const float sd = var > 0.0f ? sqrtf(var) : 0.0f;
     if (sd > maxStd) maxStd = sd;
@@ -328,8 +434,13 @@ static void calibFeedSample(const ImuRawData_t &s)
     calibPrompt();
     return;
   }
-  Serial.printf("# orientation %d: mean accel [%.4f %.4f %.4f] m/s^2\n", g_calib_index + 1, mean[0], mean[1], mean[2]);
+  Serial.printf("# orientation %d: mean accel [%.4f %.4f %.4f] m/s^2, mean rate [%.5f %.5f %.5f] deg/s, %.1f C\n",
+                g_calib_index + 1, mean[0], mean[1], mean[2],
+                gyroMean[0] * 57.2958f, gyroMean[1] * 57.2958f, gyroMean[2] * 57.2958f,
+                (float)(g_calib_temp_sum / g_calib_count));
   g_calib_fit.add(vec3(mean[0], mean[1], mean[2]));
+  g_calib_gyro_fit.add(vec3(mean[0], mean[1], mean[2]), vec3(gyroMean[0], gyroMean[1], gyroMean[2]));
+  g_calib_temp_mean_sum += (float)(g_calib_temp_sum / g_calib_count);
   g_calib_index++;
   if (g_calib_index >= CALIB_ORIENTATIONS)
   {
@@ -363,9 +474,9 @@ static void handleSerialCommand(char c)
     break;
   case 'X':
   case 'x':
-    Flash.remove(ACCEL_BIAS_FILE);
-    g_preset.valid = 0;
-    g_preset.bias[0] = g_preset.bias[1] = g_preset.bias[2] = 0.0f;
+    Flash.remove(PRESET_FILE);
+    Flash.remove(LEGACY_PRESET_FILE);
+    clearPreset();
     sendPreset();
     Serial.println("# preset erased, localizer restarting: keep the sensor still for 15 s");
     break;
@@ -403,7 +514,7 @@ void setup()
   ledOn(LED0);
   ledOff(LED1);
 
-  // Stored accelerometer bias preset (multi-orientation calibration)
+  // Stored calibration preset (six-orientation calibration)
   Flash.begin();
   loadPreset();
 
@@ -415,7 +526,7 @@ void setup()
   {
     delay(10);
   }
-  if (g_preset.valid)
+  if (g_preset.accel_valid || g_preset.gyro_valid)
   {
     sendPreset();
   }
@@ -432,7 +543,7 @@ void setup()
   printPreset();
 #endif
 #ifdef RAW_LOG_OUTPUT
-  writeRawFrame(RAW_LOG_TYPE_PRESET, &g_preset, sizeof(g_preset));
+  writeRawFrame(RAW_LOG_TYPE_CALIBRATION, &g_preset, sizeof(g_preset));
 #endif
   g_last_stats_print = millis();
 }

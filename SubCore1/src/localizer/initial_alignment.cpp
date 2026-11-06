@@ -8,18 +8,24 @@ Vec3 earthRateNwu(float latitudeDeg, float earthRate)
 }
 
 AlignmentResult computeAlignment(Vec3 meanAccel, Vec3 meanGyro,
-                                 float gravity, float latitudeDeg, float earthRate)
+                                 float gravity, float latitudeDeg, float earthRate,
+                                 const Vec3 *gyroBiasPreset)
 {
   AlignmentResult r;
   r.meanAccel = meanAccel;
   r.meanGyro = meanGyro;
+  r.gyroPresetUsed = gyroBiasPreset != 0;
 
   // Up axis: direction of the measured specific force at rest.
   const Vec3 up = vec3Normalise(meanAccel);
 
-  // Horizontal component of the mean angular rate points North.
-  Vec3 horizontal = vec3Sub(meanGyro, vec3Scale(up, vec3Dot(meanGyro, up)));
+  // Horizontal component of the mean angular rate points North. A known
+  // gyro bias is removed first: it is usually larger than the horizontal
+  // earth rate and would otherwise decide the heading.
+  const Vec3 rateForNorth = gyroBiasPreset ? vec3Sub(meanGyro, *gyroBiasPreset) : meanGyro;
+  Vec3 horizontal = vec3Sub(rateForNorth, vec3Scale(up, vec3Dot(rateForNorth, up)));
   const float horizontalNorm = vec3Norm(horizontal);
+  r.horizontalRate = horizontalNorm;
   r.northValid = horizontalNorm > 1.0e-9f;
 
   Vec3 north;
@@ -41,7 +47,9 @@ AlignmentResult computeAlignment(Vec3 meanAccel, Vec3 meanGyro,
   const Vec3 omegaNwu = earthRateNwu(latitudeDeg, earthRate);
   r.earthRateSensor = vec3Add(vec3Scale(north, omegaNwu.x), vec3Scale(up, omegaNwu.z));
 
-  // Whatever remains after removing the earth rotation is gyro offset.
+  // Whatever remains after removing the earth rotation is gyro offset. This
+  // is deliberately not the preset: with the measured mean the sensor shows
+  // no rotation at rest even if the preset has drifted since the calibration.
   r.gyroOffset = vec3Sub(meanGyro, r.earthRateSensor);
 
   // Only the magnitude discrepancy along gravity is observable at a single
@@ -100,7 +108,7 @@ Vec3 InitialAlignment::meanGyro() const
   return vec3((float)(gyroSum_[0] / count_), (float)(gyroSum_[1] / count_), (float)(gyroSum_[2] / count_));
 }
 
-AlignmentResult InitialAlignment::compute(float gravity, float latitudeDeg, float earthRate) const
+AlignmentResult InitialAlignment::compute(float gravity, float latitudeDeg, float earthRate, const Vec3 *gyroBiasPreset) const
 {
-  return computeAlignment(meanAccel(), meanGyro(), gravity, latitudeDeg, earthRate);
+  return computeAlignment(meanAccel(), meanGyro(), gravity, latitudeDeg, earthRate, gyroBiasPreset);
 }

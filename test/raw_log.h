@@ -12,6 +12,10 @@
 #include "shared_types.h"
 #include "localizer/localizer.h"
 
+static_assert(sizeof(CalibrationPreset_t) == 32, "tools/record_raw.py hard-codes the frame sizes");
+static_assert(sizeof(ImuRawData_t) == 32 && sizeof(PositionData_t) == 76 && sizeof(ProcessingStats_t) == 80,
+              "tools/record_raw.py hard-codes the frame sizes");
+
 struct Frame
 {
   uint8_t type;
@@ -25,7 +29,8 @@ static inline size_t frameSize(uint8_t type)
   case RAW_LOG_TYPE_IMU: return sizeof(ImuRawData_t);
   case RAW_LOG_TYPE_POSITION: return sizeof(PositionData_t);
   case RAW_LOG_TYPE_STATS: return sizeof(ProcessingStats_t);
-  case RAW_LOG_TYPE_PRESET: return sizeof(AccelBiasPreset_t);
+  case RAW_LOG_TYPE_PRESET: return RAW_LOG_LEGACY_PRESET_SIZE;
+  case RAW_LOG_TYPE_CALIBRATION: return sizeof(CalibrationPreset_t);
   default: return 0;
   }
 }
@@ -59,6 +64,27 @@ static inline std::vector<Frame> parse(const std::vector<uint8_t> &d, size_t &ba
     i += 4 + size;
   }
   return out;
+}
+
+/**
+ * Decode a preset frame (legacy accelerometer-only type 3 or type 4) into a
+ * CalibrationPreset_t. Returns false for other frame types.
+ */
+static inline bool decodePreset(const Frame &f, CalibrationPreset_t &preset)
+{
+  std::memset(&preset, 0, sizeof(preset));
+  if (f.type == RAW_LOG_TYPE_CALIBRATION && f.payload.size() == sizeof(preset))
+  {
+    std::memcpy(&preset, f.payload.data(), sizeof(preset));
+    return true;
+  }
+  if (f.type == RAW_LOG_TYPE_PRESET && f.payload.size() == RAW_LOG_LEGACY_PRESET_SIZE)
+  {
+    std::memcpy(preset.accel_bias, f.payload.data(), sizeof(preset.accel_bias));
+    preset.accel_valid = f.payload[sizeof(preset.accel_bias)];
+    return true;
+  }
+  return false;
 }
 
 /** Read a whole file; returns false if it cannot be opened. */

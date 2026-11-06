@@ -399,3 +399,48 @@ TEST(localizer_reset_returns_to_calibration)
   CHECK(loc.calibrationProgress() == 0);
   CHECK(loc.diagnostics().samplesProcessed == 0);
 }
+
+TEST(localizer_gyro_preset_gives_true_heading)
+{
+  // Real-board bias (0.006, -0.005, -0.023 deg/s), larger than the
+  // horizontal earth rate: the initial heading is arbitrary unless the
+  // gyro bias preset from the six-orientation calibration is applied.
+  SimConfig cfg = realisticNoise();
+  cfg.gyroBias = vec3(1.1e-4f, -0.9e-4f, -4.1e-4f);
+  Localizer without;
+  const RunResult a = runSimulation(without, cfg, stationaryTrajectory(tilted()), 20.0);
+  Localizer with;
+  with.setGyroBiasPreset(cfg.gyroBias, true);
+  const RunResult b = runSimulation(with, cfg, stationaryTrajectory(tilted()), 20.0);
+  METRIC("initial heading error without preset (deg)", a.initialHeadingErrorDeg);
+  METRIC("initial heading error with preset (deg)", b.initialHeadingErrorDeg);
+  CHECK(with.alignment().gyroPresetUsed);
+  CHECK(!without.alignment().gyroPresetUsed);
+  // 15 s of white noise on the horizontal rate leaves a few degrees
+  CHECK_LT(fabsf(b.initialHeadingErrorDeg), 8.0f);
+  CHECK_LT(20.0f, fabsf(a.initialHeadingErrorDeg));
+  CHECK_LT(b.maxTiltErrorDeg, 0.3f);
+  CHECK_LT(b.finalPositionError, 0.002f);
+}
+
+TEST(localizer_drifted_gyro_preset_does_not_drift_attitude)
+{
+  // The preset is used for the heading only; a preset that no longer fits
+  // (0.001 deg/s off, a few degrees of temperature change) must leave the
+  // attitude at rest as stable as without any preset.
+  SimConfig cfg = realisticNoise();
+  cfg.gyroBias = vec3(1.1e-4f, -0.9e-4f, -4.1e-4f);
+  Localizer reference;
+  const RunResult a = runSimulation(reference, cfg, stationaryTrajectory(tilted()), 60.0);
+  Localizer drifted;
+  drifted.setGyroBiasPreset(vec3Add(cfg.gyroBias, vec3(1.2e-5f, -1.0e-5f, 0.8e-5f)), true);
+  const RunResult b = runSimulation(drifted, cfg, stationaryTrajectory(tilted()), 60.0);
+  METRIC("heading drift without preset (deg)", a.maxHeadingDriftDeg);
+  METRIC("heading drift with drifted preset (deg)", b.maxHeadingDriftDeg);
+  METRIC("tilt error with drifted preset (deg)", b.maxTiltErrorDeg);
+  CHECK_LT(b.maxHeadingDriftDeg, a.maxHeadingDriftDeg + 0.02f);
+  CHECK_LT(b.maxHeadingDriftDeg, 0.1f);
+  CHECK_LT(b.maxTiltErrorDeg, 0.3f);
+  CHECK_LT(b.maxSpeedErrorWhileStill, 0.01f);
+  CHECK_LT(b.finalPositionError, 0.002f);
+}

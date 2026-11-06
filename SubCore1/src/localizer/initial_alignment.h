@@ -8,6 +8,14 @@
  * Earth rotation and therefore points North (gyro-compassing). From these two
  * directions a North-West-Up frame is built, which matches the Fusion NWU
  * convention.
+ *
+ * The gyro bias is usually larger than the horizontal earth rate, which
+ * makes the heading arbitrary. When the bias is known from the
+ * six-orientation calibration (gyro_bias_fit.h) it is removed before the
+ * North direction is taken. The run-time gyro offset is still the measured
+ * mean minus the earth rotation, so a preset that has drifted (temperature,
+ * turn-on repeatability) can only degrade the heading, never the attitude
+ * at rest.
  */
 #ifndef INITIAL_ALIGNMENT_H
 #define INITIAL_ALIGNMENT_H
@@ -23,7 +31,9 @@ struct AlignmentResult
   Vec3 meanAccel;       // m/s^2, sensor frame
   Vec3 meanGyro;        // rad/s, sensor frame
   Vec3 earthRateSensor; // rad/s, expected earth rotation in sensor frame
+  float horizontalRate; // rad/s, magnitude of the horizontal rate used for North (earthRate*cos(lat) if the bias is fully removed)
   bool northValid;      // false if the horizontal gyro component was too small to define North
+  bool gyroPresetUsed;  // North was taken after removing a known gyro bias
 };
 
 /** Earth rotation vector in the NWU frame for a given latitude. */
@@ -36,9 +46,12 @@ Vec3 earthRateNwu(float latitudeDeg, float earthRate);
  * @param gravity   local gravity magnitude (m/s^2)
  * @param latitudeDeg latitude used for the earth-rate model
  * @param earthRate earth rotation rate (rad/s)
+ * @param gyroBiasPreset optional known gyro bias (rad/s, sensor frame),
+ *        removed from the mean gyro before the North direction is taken
  */
 AlignmentResult computeAlignment(Vec3 meanAccel, Vec3 meanGyro,
-                                 float gravity, float latitudeDeg, float earthRate);
+                                 float gravity, float latitudeDeg, float earthRate,
+                                 const Vec3 *gyroBiasPreset = 0);
 
 /** Accumulates samples and computes the alignment once enough are collected. */
 class InitialAlignment
@@ -61,7 +74,7 @@ public:
   Vec3 meanAccel() const;
   Vec3 meanGyro() const;
 
-  AlignmentResult compute(float gravity, float latitudeDeg, float earthRate) const;
+  AlignmentResult compute(float gravity, float latitudeDeg, float earthRate, const Vec3 *gyroBiasPreset = 0) const;
 
 private:
   uint32_t required_;

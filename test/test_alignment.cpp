@@ -112,3 +112,67 @@ TEST(alignment_accumulator_averages)
   CHECK(acc.add(vec3(100, 100, 100), vec3(100, 100, 100)));
   CHECK_NEAR(acc.meanAccel().x, 2.0f, 1e-6);
 }
+
+TEST(alignment_gyro_preset_restores_north_with_large_bias)
+{
+  // The bias of the real board (0.006, -0.005, -0.023 deg/s) exceeds the
+  // horizontal earth rate (0.0034 deg/s): without the preset the heading
+  // is wrong, with it North is recovered exactly.
+  std::mt19937 rng(5);
+  const Vec3 gyroBias = vec3(1.1e-4f, -0.9e-4f, -4.1e-4f);
+  const Vec3 omegaNwu = earthRateNwu(LAT, W);
+  float worstWithout = 0.0f, worstWith = 0.0f;
+  for (int i = 0; i < 300; i++)
+  {
+    const Quat truth = randomQuat(rng);
+    const Vec3 meanAccel = quatRotateEarthToSensor(truth, vec3(0, 0, G));
+    const Vec3 meanGyro = vec3Add(quatRotateEarthToSensor(truth, omegaNwu), gyroBias);
+    const Vec3 northTrue = quatRotateEarthToSensor(truth, vec3(1, 0, 0));
+
+    const AlignmentResult without = computeAlignment(meanAccel, meanGyro, G, LAT, W);
+    const AlignmentResult with = computeAlignment(meanAccel, meanGyro, G, LAT, W, &gyroBias);
+    CHECK(!without.gyroPresetUsed);
+    CHECK(with.gyroPresetUsed);
+    CHECK(with.northValid);
+    const float errWithout = vec3AngleBetween(quatRotateEarthToSensor(without.quaternion, vec3(1, 0, 0)), northTrue) * 180.0f / LOCALIZER_PI;
+    const float errWith = vec3AngleBetween(quatRotateEarthToSensor(with.quaternion, vec3(1, 0, 0)), northTrue) * 180.0f / LOCALIZER_PI;
+    if (errWithout > worstWithout) worstWithout = errWithout;
+    if (errWith > worstWith) worstWith = errWith;
+    // the horizontal rate left after removing the bias is the horizontal earth rate
+    CHECK_NEAR(with.horizontalRate, omegaNwu.x, 1e-8);
+    // the run-time offset is the measured bias either way ...
+    CHECK_NEAR(vec3Norm(vec3Sub(with.gyroOffset, gyroBias)), 0.0f, 1e-8);
+    // ... and the residual rotation at rest is zero either way
+    const Vec3 residual = vec3Sub(vec3Sub(meanGyro, without.gyroOffset), without.earthRateSensor);
+    CHECK_NEAR(vec3Norm(residual), 0.0f, 1e-8);
+    // the tilt is not affected by the preset
+    CHECK_LT(vec3AngleBetween(quatRotateEarthToSensor(with.quaternion, vec3(0, 0, 1)), vec3Normalise(meanAccel)) * 180.0f / LOCALIZER_PI, 0.01f);
+  }
+  METRIC("worst heading error without preset (deg)", worstWithout);
+  METRIC("worst heading error with preset (deg)", worstWith);
+  CHECK_LT(90.0f, worstWithout);
+  CHECK_LT(worstWith, 0.05f);
+}
+
+TEST(alignment_drifted_gyro_preset_only_degrades_heading)
+{
+  // A preset that is off by 0.001 deg/s (temperature drift of a few degrees)
+  // must not introduce a rotation at rest: the offset still comes from the
+  // measured mean. The heading error stays bounded by the drift / earth rate.
+  const Quat truth = quatNormalise({0.8f, 0.3f, -0.2f, 0.4f});
+  const Vec3 gyroBias = vec3(1.1e-4f, -0.9e-4f, -4.1e-4f);
+  const Vec3 drift = vec3(1.2e-5f, -1.0e-5f, 0.8e-5f);
+  const Vec3 preset = vec3Add(gyroBias, drift);
+  const Vec3 omegaNwu = earthRateNwu(LAT, W);
+  const Vec3 meanAccel = quatRotateEarthToSensor(truth, vec3(0, 0, G));
+  const Vec3 meanGyro = vec3Add(quatRotateEarthToSensor(truth, omegaNwu), gyroBias);
+  const AlignmentResult r = computeAlignment(meanAccel, meanGyro, G, LAT, W, &preset);
+  const Vec3 residual = vec3Sub(vec3Sub(meanGyro, r.gyroOffset), r.earthRateSensor);
+  CHECK_NEAR(vec3Norm(residual), 0.0f, 1e-8);
+  const Vec3 northTrue = quatRotateEarthToSensor(truth, vec3(1, 0, 0));
+  const float headingErr = vec3AngleBetween(quatRotateEarthToSensor(r.quaternion, vec3(1, 0, 0)), northTrue) * 180.0f / LOCALIZER_PI;
+  METRIC("heading error with 0.001 deg/s preset drift (deg)", headingErr);
+  const float bound = atanf(vec3Norm(drift) / omegaNwu.x) * 180.0f / LOCALIZER_PI;
+  CHECK_LT(headingErr, bound + 0.01f);
+  CHECK_LT(0.1f, headingErr); // the drift is not silently ignored either
+}

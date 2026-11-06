@@ -29,7 +29,7 @@
 // Message IDs for inter-core communication
 #define MSG_ID_RING_ADDR 0x01     // MainCore -> SubCore: address of the ImuRing_t
 #define MSG_ID_IMU_AVAILABLE 0x02 // MainCore -> SubCore: new samples in the ring (data = head)
-#define MSG_ID_ACCEL_BIAS 0x03    // MainCore -> SubCore: pointer to AccelBiasPreset_t (then resets)
+#define MSG_ID_PRESET 0x03        // MainCore -> SubCore: pointer to CalibrationPreset_t (then resets)
 #define MSG_ID_RESET 0x04         // MainCore -> SubCore: restart the localizer (re-calibrate)
 #define MSG_ID_POSITION 0x05      // SubCore -> MainCore: pointer to PositionData_t
 #define MSG_ID_STATS 0x12         // SubCore -> MainCore: pointer to ProcessingStats_t
@@ -53,14 +53,18 @@ typedef struct
 } ImuRawData_t;
 
 /**
- * @brief Accelerometer bias from the multi-orientation calibration
- *        (stored by MainCore in flash, applied by SubCore1).
+ * @brief Result of the six-orientation calibration (stored by MainCore in
+ *        flash, applied by SubCore1): accelerometer bias from the sphere fit
+ *        and gyroscope bias from the earth-rotation fit (gyro_bias_fit.h).
  */
 typedef struct
 {
-  float bias[3]; // m/s^2, sensor frame
-  uint8_t valid; // 0 = no calibration stored
-} AccelBiasPreset_t;
+  float accel_bias[3]; // m/s^2, sensor frame
+  float gyro_bias[3];  // rad/s, sensor frame, earth rotation removed
+  float temperature;   // IMU temperature during the calibration (deg C)
+  uint8_t accel_valid; // 0 = no accelerometer calibration stored
+  uint8_t gyro_valid;  // 0 = no gyroscope calibration stored
+} CalibrationPreset_t;
 
 /**
  * @brief Position estimation result (SubCore -> MainCore, OUTPUT_RATE_HZ)
@@ -114,7 +118,9 @@ typedef struct
 #define RAW_LOG_TYPE_IMU 0      // payload: ImuRawData_t
 #define RAW_LOG_TYPE_POSITION 1 // payload: PositionData_t
 #define RAW_LOG_TYPE_STATS 2    // payload: ProcessingStats_t
-#define RAW_LOG_TYPE_PRESET 3   // payload: AccelBiasPreset_t (sent at start-up)
+#define RAW_LOG_TYPE_PRESET 3   // legacy: accelerometer-only preset (float bias[3]; uint8_t valid)
+#define RAW_LOG_TYPE_CALIBRATION 4 // payload: CalibrationPreset_t (sent at start-up)
+#define RAW_LOG_LEGACY_PRESET_SIZE 16 // sizeof() of the legacy type 3 payload
 
 /* -------------------------------------------------------------------------
  * Single-producer / single-consumer ring buffer for the IMU stream.

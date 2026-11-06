@@ -30,7 +30,7 @@ IMU samples cross the core boundary through a 256-entry ring buffer (about 133 m
 
 - **Lossless data path:** ring buffer instead of a single overwritten struct; losses are detected and counted
 - **High-speed acquisition:** 1920 Hz, the full performance of the IMU
-- **Gyro-compass initial alignment:** Up from the mean accelerometer vector, North from the horizontal component of the mean angular rate; the initial quaternion matches the Fusion NWU convention
+- **Gyro-compass initial alignment:** Up from the mean accelerometer vector, North from the horizontal component of the mean angular rate; the initial quaternion matches the Fusion NWU convention. With the gyro bias from the six-orientation calibration removed first, the heading is true north instead of arbitrary
 - **Initial gyro offset and earth-rate compensation:** the mean angular rate minus the expected earth rotation seeds the gyro offset; while running, the earth rotation is continuously removed using the current attitude
 - **Fusion AHRS:** acceleration rejection and gravity removal
 - **ZUPT (variance + mean):** besides the signal variance, the window mean of acceleration and angular rate is checked, so a smooth acceleration is not mistaken for rest; while the estimated speed is large the confirmation period is extended to survive short constant-velocity phases
@@ -134,12 +134,15 @@ The suite covers:
 - unit tests of the Gaussian filter, ZUPT detector and integrator (the previous implementation is kept as a reference for equivalence checks)
 - ring buffer: no loss within capacity, overrun detection, concurrent producer/consumer
 - end-to-end regression scenarios with synthetic IMU data (noise, bias, earth rotation): stationary, tilted start, rotation, translation, timestamp wrap-around, dt on lost samples
+- six-orientation fits: accelerometer sphere fit and gyro earth-rotation fit (synthetic faces with random headings, the real board's means, degenerate orientation sets), gyro preset restores north and cannot cause drift when it is off, raw-log frame parsing
 
 Every scenario prints its current performance figures as `metric` lines. Tighten the bounds as the algorithm improves; never loosen them.
 
-## Accelerometer bias calibration (six orientations)
+## Accelerometer and gyro bias calibration (six orientations)
 
-The stationary calibration at start-up can only observe the accelerometer bias along gravity; the components perpendicular to it are absorbed into the attitude and show up as horizontal errors once the sensor is tilted a lot or carried by hand. The normal build offers a guided six-orientation calibration over the serial port; the result is stored in the SPI flash and used automatically from the next boot on.
+The stationary calibration at start-up can only observe the accelerometer bias along gravity; the components perpendicular to it are absorbed into the attitude and show up as horizontal errors once the sensor is tilted a lot or carried by hand. The gyro bias is the other limit: it is usually larger than the horizontal earth rate (0.0034 °/s in Tokyo), which makes the gyro-compass heading arbitrary. The normal build offers a guided six-orientation calibration over the serial port that determines both; the result is stored in the SPI flash and used automatically from the next boot on.
+
+**Let the board warm up first.** The gyro bias drifts with temperature (about −0.00035 °/s per °C on the z axis of this board, i.e. 0.001 °/s over 3 °C, a third of the horizontal earth rate). The IMU temperature settles about 30 minutes after power-on, so leave the board running for 30 minutes before calibrating, and calibrate at the temperature it will be used at.
 
 The bundled script walks through the whole procedure:
 
@@ -152,12 +155,14 @@ python3 tools/calibrate_accel_bias.py /dev/ttyUSB0 --erase  # erase the stored p
 Doing it by hand from a serial monitor:
 
 1. Send `C` from the serial monitor (115200 baud). Position output pauses and the first orientation is requested
-2. Put the sensor in the requested orientation (+Z up = board flat, −Z up = upside down, ±X / ±Y up = board standing on an edge), keep it still and send `Y`. Three seconds are measured; if the sensor moved you are asked to repeat that orientation
-3. After six orientations the three-axis bias and the residual are printed and saved. SubCore1 restarts its 15 s stationary calibration with the new bias, so keep the sensor still
+2. Put the sensor in the requested orientation (+Z up = board flat, −Z up = upside down, ±X / ±Y up = board standing on an edge), keep it still and send `Y`. Ten seconds are measured; if the sensor moved you are asked to repeat that orientation
+3. After six orientations the accelerometer bias, the gyro bias, their residuals and the vertical earth rate seen by the gyro are printed and saved. SubCore1 restarts its 15 s stationary calibration with the new values, so keep the sensor still
 
-A few degrees of misalignment per orientation do not matter (it is a sphere fit; six roughly orthogonal directions are enough). Other commands: `P` print the stored preset, `X` erase it, `R` restart the localizer (15 s still), `Q` abort the calibration. The raw-logging build ignores commands but writes the stored preset at the start of the recording so that the replay applies the same value (`--no-preset`, `--preset x y z` override it).
+A few degrees of misalignment per orientation do not matter (six roughly orthogonal directions are enough). Other commands: `P` print the stored preset, `X` erase it, `R` restart the localizer (15 s still), `Q` abort the calibration. The raw-logging build ignores commands but writes the stored preset at the start of the recording so that the replay applies the same values (`--no-preset`, `--preset x y z` in m/s², `--gyro-preset x y z` in °/s override them).
 
-Typical result for this board: z ≈ +0.04 m/s², y ≈ −0.012 m/s².
+How the gyro bias is found: at rest the gyro measures the earth rotation plus the bias. The horizontal part of the earth rotation depends on the heading of each orientation, which is unknown, but its component along gravity is the same everywhere: Ω·sin(latitude), 0.0024 °/s in Tokyo. The gravity direction of each orientation is known from the accelerometer mean (after the sphere-fit bias is removed), so each orientation gives one linear equation for the bias, and the six faces give a well-determined least-squares solution; between the two faces of each axis the latitude term even cancels. As a check the vertical earth rate is also solved as a free parameter: it should come out near the expected value for the configured latitude (8.8 °/h in Tokyo; the real board gives 8.8 °/h), which proves that the gyro really sees the earth rotation. The result is only used to find north at start-up; the run-time gyro offset is still taken from the 15 s stationary mean, so a preset that no longer fits (temperature, turn-on repeatability) can degrade the heading but never adds drift at rest.
+
+Typical result for this board: accelerometer z ≈ +0.04 m/s², y ≈ −0.012 m/s²; gyro ≈ (−0.005, −0.003, −0.0235) °/s at 37 °C.
 
 ## Recording and replaying device data
 
@@ -196,7 +201,8 @@ The recording firmware stays silent for 2 s after boot so that the flash writer 
 cxd5602pwbimu_localizer_arduino/
 ├── cxd5602pwbimu_localizer_arduino.ino  # MainCore: IMU acquisition, serial output, six-orientation calibration
 ├── shared_types.h                        # inter-core structs and ring buffer
-├── accel_bias_fit.h, vec_math.h          # links into SubCore1/src/localizer/ (used by MainCore's calibration)
+├── accel_bias_fit.h, gyro_bias_fit.h,    # links into SubCore1/src/localizer/ (used by MainCore's calibration)
+├── vec_math.h, localizer_config.h
 ├── SubCore1/
 │   ├── SubCore1.ino                      # SubCore1: runs the pipeline, sends results
 │   ├── shared_types.h -> ../shared_types.h
@@ -206,7 +212,8 @@ cxd5602pwbimu_localizer_arduino/
 │           ├── localizer_config.h        # all parameters
 │           ├── vec_math.h                # vectors and quaternions
 │           ├── initial_alignment.*       # initial attitude / offset / bias
-│           ├── accel_bias_fit.h          # six-orientation sphere fit
+│           ├── accel_bias_fit.h          # six-orientation sphere fit (accelerometer)
+│           ├── gyro_bias_fit.h           # six-orientation earth-rotation fit (gyro)
 │           ├── gaussian_filter.*         # causal Gaussian filter
 │           ├── zupt_detector.*           # variance based ZUPT
 │           ├── velocity_integrator.*     # trapezoidal integration
@@ -230,7 +237,7 @@ cxd5602pwbimu_localizer_arduino/
 ### Initial alignment (15 s, stationary)
 
 1. Average the accelerometer and gyroscope readings
-2. Up = direction of the mean acceleration, North = horizontal component of the mean angular rate, West = Up × North; the initial quaternion is built from this NWU triad
+2. Up = direction of the mean acceleration, North = horizontal component of the mean angular rate (after removing the gyro bias preset when one is stored), West = Up × North; the initial quaternion is built from this NWU triad
 3. The earth rotation vector for the configured latitude is rotated into the sensor frame and subtracted from the mean angular rate; the remainder is the gyro offset
 4. The expected gravity vector is subtracted from the mean acceleration to obtain the accelerometer bias (the component perpendicular to gravity is unobservable at a single orientation, which is why the six-orientation preset is subtracted beforehand)
 
@@ -275,7 +282,7 @@ With both the retroactive correction and the gain scheduling disabled the closur
 
 - **Constant-velocity motion longer than 1 s is indistinguishable from rest.** This is inherent to a stand-alone IMU; shorter coasting phases are handled by the speed-dependent confirmation time
 - **Slow motion** with accelerations around 0.1 m/s² sits at the mean-acceleration threshold and comes out short
-- **Gyro-compass accuracy depends on the gyro bias.** If the bias exceeds the horizontal earth rate (about 0.0034 °/s in Tokyo) the initial heading is arbitrary (relative positioning is unaffected; the tests evaluate position error in the initial-heading-aligned frame)
+- **Gyro-compass accuracy depends on the gyro bias.** Without the six-orientation gyro preset the bias of this board (0.006 °/s horizontal) exceeds the horizontal earth rate (about 0.0034 °/s in Tokyo) and the initial heading is arbitrary. With the preset the heading noise of a 15 s alignment is about 5°, and a temperature change of a few °C since the calibration adds a comparable error (relative positioning is unaffected either way; the tests evaluate position error in the initial-heading-aligned frame). Modelling the temperature dependence of the bias is the next step
 - **Thresholds have not been tuned on real motion data.** The synthetic data includes noise, bias and earth rotation but not the real vibration signature. Recordings from the device can be replayed on the host (see below) to close this gap
 
 ## Configuration

@@ -1,0 +1,1 @@
+SubCore1/src/localizer/localizer_config.h

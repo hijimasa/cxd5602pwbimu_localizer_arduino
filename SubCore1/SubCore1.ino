@@ -156,10 +156,11 @@ static void handleMessage(int8_t msgid, uint32_t msgdata)
     imu_ring = (const ImuRing_t *)msgdata;
     ring_tail = imu_ring->head; // start with the samples that arrive from now on
   }
-  else if (msgid == MSG_ID_ACCEL_BIAS)
+  else if (msgid == MSG_ID_PRESET)
   {
-    const AccelBiasPreset_t *preset = (const AccelBiasPreset_t *)msgdata;
-    localizer.setAccelBiasPreset(preset->valid ? vec3(preset->bias[0], preset->bias[1], preset->bias[2]) : vec3Zero());
+    const CalibrationPreset_t *preset = (const CalibrationPreset_t *)msgdata;
+    localizer.setAccelBiasPreset(preset->accel_valid ? vec3(preset->accel_bias[0], preset->accel_bias[1], preset->accel_bias[2]) : vec3Zero());
+    localizer.setGyroBiasPreset(vec3(preset->gyro_bias[0], preset->gyro_bias[1], preset->gyro_bias[2]), preset->gyro_valid != 0);
     localizer.reset(); // re-run the stationary calibration with the new preset
     output_divider = 0;
   }

@@ -104,6 +104,20 @@ public:
   void setAccelBiasPreset(Vec3 bias) { accelBiasPreset_ = bias; }
   Vec3 accelBiasPreset() const { return accelBiasPreset_; }
 
+  /**
+   * Gyroscope bias known from the six-orientation calibration
+   * (gyro_bias_fit.h). Used by the initial alignment to find North: the
+   * horizontal earth rate is smaller than a typical bias, so without it the
+   * initial heading is arbitrary. It does not replace the run-time offset.
+   */
+  void setGyroBiasPreset(Vec3 bias, bool valid)
+  {
+    gyroBiasPreset_ = valid ? bias : vec3Zero();
+    hasGyroBiasPreset_ = valid;
+  }
+  Vec3 gyroBiasPreset() const { return gyroBiasPreset_; }
+  bool hasGyroBiasPreset() const { return hasGyroBiasPreset_; }
+
   /** Enable/disable earth rotation compensation (enabled by default). */
   void setEarthRateCompensation(bool enabled) { earthRateCompensation_ = enabled; }
 
@@ -143,6 +157,8 @@ private:
 
   Vec3 accelBias_;
   Vec3 accelBiasPreset_;
+  Vec3 gyroBiasPreset_;
+  bool hasGyroBiasPreset_;
   Vec3 earthRateNwu_;
   bool earthRateCompensation_;
   bool biasLearning_;

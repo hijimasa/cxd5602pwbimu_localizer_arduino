@@ -5,7 +5,10 @@
  *
  * Usage: replay LOG.bin [--csv OUT.csv] [--calib-seconds S] [--no-earth-rate]
  *                       [--no-gain-schedule] [--no-retro] [--no-bias-learning]
- *                       [--no-preset] [--preset BX BY BZ]
+ *                       [--no-preset] [--preset BX BY BZ] [--gyro-preset GX GY GZ]
+ *
+ * --preset takes the accelerometer bias in m/s^2, --gyro-preset the gyro
+ * bias in deg/s; both override the values stored in the recording.
  *
  * Prints run statistics and, if the log also contains the position frames
  * produced on the device, the maximum deviation between the device estimate
@@ -23,11 +26,11 @@ int main(int argc, char **argv)
 {
   if (argc < 2)
   {
-    std::fprintf(stderr, "usage: %s LOG.bin [--csv OUT.csv] [--calib-seconds S] [--no-earth-rate] [--no-gain-schedule] [--no-retro] [--no-bias-learning]\n", argv[0]);
+    std::fprintf(stderr, "usage: %s LOG.bin [--csv OUT.csv] [--calib-seconds S] [--no-earth-rate] [--no-gain-schedule] [--no-retro] [--no-bias-learning] [--no-preset] [--preset BX BY BZ] [--gyro-preset GX GY GZ]\n", argv[0]);
     return 2;
   }
   const char *csvPath = nullptr;
-  bool noPreset = false;
+  bool noPreset = false, accelPresetOverride = false, gyroPresetOverride = false;
   Localizer loc;
   for (int i = 2; i < argc; i++)
   {
@@ -42,6 +45,13 @@ int main(int argc, char **argv)
     {
       const float x = (float)std::atof(argv[++i]), y = (float)std::atof(argv[++i]), z = (float)std::atof(argv[++i]);
       loc.setAccelBiasPreset(vec3(x, y, z));
+      accelPresetOverride = true;
+    }
+    else if (!std::strcmp(argv[i], "--gyro-preset") && i + 3 < argc)
+    {
+      const float x = (float)std::atof(argv[++i]), y = (float)std::atof(argv[++i]), z = (float)std::atof(argv[++i]);
+      loc.setGyroBiasPreset(vec3Scale(vec3(x, y, z), LOCALIZER_PI / 180.0f), true);
+      gyroPresetOverride = true;
     }
   }
 
@@ -103,14 +113,20 @@ int main(int argc, char **argv)
                      st.earthAccel.x, st.earthAccel.y, st.earthAccel.z, st.gyro.x, st.gyro.y, st.gyro.z, loc.currentAhrsGain());
       }
     }
-    else if (fr.type == RAW_LOG_TYPE_PRESET)
+    else if (fr.type == RAW_LOG_TYPE_PRESET || fr.type == RAW_LOG_TYPE_CALIBRATION)
     {
-      AccelBiasPreset_t preset;
-      std::memcpy(&preset, fr.payload.data(), sizeof(preset));
-      if (preset.valid && !noPreset)
+      CalibrationPreset_t preset;
+      if (!decodePreset(fr, preset) || noPreset) continue;
+      if (preset.accel_valid && !accelPresetOverride)
       {
-        loc.setAccelBiasPreset(vec3(preset.bias[0], preset.bias[1], preset.bias[2]));
-        std::printf("accel bias preset from recording: [%.4f %.4f %.4f] m/s^2\n", preset.bias[0], preset.bias[1], preset.bias[2]);
+        loc.setAccelBiasPreset(vec3(preset.accel_bias[0], preset.accel_bias[1], preset.accel_bias[2]));
+        std::printf("accel bias preset from recording: [%.4f %.4f %.4f] m/s^2\n", preset.accel_bias[0], preset.accel_bias[1], preset.accel_bias[2]);
+      }
+      if (preset.gyro_valid && !gyroPresetOverride)
+      {
+        loc.setGyroBiasPreset(vec3(preset.gyro_bias[0], preset.gyro_bias[1], preset.gyro_bias[2]), true);
+        std::printf("gyro bias preset from recording: [%.5f %.5f %.5f] deg/s (calibrated at %.1f C)\n",
+                    preset.gyro_bias[0] * 57.2958f, preset.gyro_bias[1] * 57.2958f, preset.gyro_bias[2] * 57.2958f, preset.temperature);
       }
     }
     else if (fr.type == RAW_LOG_TYPE_POSITION)
@@ -148,6 +164,11 @@ int main(int argc, char **argv)
     std::printf("alignment: gyro offset [%.4f %.4f %.4f] deg/s, accel bias [%.4f %.4f %.4f] m/s^2, north %s\n",
                 a.gyroOffset.x * 57.2958f, a.gyroOffset.y * 57.2958f, a.gyroOffset.z * 57.2958f,
                 a.accelBias.x, a.accelBias.y, a.accelBias.z, a.northValid ? "valid" : "undefined");
+    // With the gyro bias removed the horizontal rate is the horizontal earth
+    // rate; a large deviation means the gyro preset no longer fits.
+    const float earthHorizontal = LOCALIZER_EARTH_RATE * cosf(LOCALIZER_LATITUDE_DEG * LOCALIZER_PI / 180.0f);
+    std::printf("horizontal rate used for north: %.4f deg/s (earth rate %.4f deg/s), gyro preset %s\n",
+                a.horizontalRate * 57.2958f, earthHorizontal * 57.2958f, a.gyroPresetUsed ? "applied" : "none");
     const Vec3 b = loc.accelBias();
     std::printf("final accel bias [%.4f %.4f %.4f], stationary %.1f %% of samples, max speed %.3f m/s\n",
                 b.x, b.y, b.z, running ? 100.0 * stationaryCount / running : 0.0, maxSpeed);

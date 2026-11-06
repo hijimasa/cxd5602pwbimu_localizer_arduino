@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Guided six-orientation accelerometer bias calibration of the localizer.
+"""Guided six-orientation accelerometer and gyro bias calibration.
 
 Drives the serial calibration mode of the normal MainCore build (not the
 RAW_LOG_OUTPUT build): sends C, shows each orientation request, waits for
 you to press Enter, sends Y, and reports the result that the board stored
-in its flash.
+in its flash (accelerometer bias from the sphere fit, gyro bias from the
+earth-rotation fit, and the IMU temperature during the calibration).
+
+The gyro bias drifts with temperature (about -0.00035 deg/s per degree C on
+this board), so leave the board powered for about 30 minutes before
+calibrating: the IMU temperature has settled by then.
 
 Usage: calibrate_accel_bias.py [PORT] [--baud 115200] [--no-usb-reset]
        calibrate_accel_bias.py PORT --show     (only print the stored preset)
@@ -79,14 +84,14 @@ def usb_reset(enabled):
 
 def show_preset(board):
     board.send("P")
-    line = board.wait_for(["# accel bias preset"], 3.0)
+    line = board.wait_for(["# preset:"], 3.0)
     print(line if line else "応答がありません。通常ビルドのMainCoreが動いていますか？（生データ記録ビルドではコマンドは無効です）")
     return line
 
 
 def calibrate(board):
     board.send("C")
-    prompt = board.wait_for(["# calibration 1/", "# accelerometer bias calibration"], 5.0)
+    prompt = board.wait_for(["# calibration 1/", "# bias calibration"], 5.0)
     if prompt is None:
         print("較正モードに入れません。通常ビルドのMainCoreが動いているか、ポートとボーレートを確認してください。")
         return False
@@ -119,9 +124,9 @@ def calibrate(board):
         if line is None:
             print("計測が始まりません。もう一度 Enter を押してください。")
             continue
-        print("  計測中（3秒）...")
+        print("  計測中（10秒）...")
         while True:
-            line = board.wait_for(["# orientation", "# the sensor moved", "# result:", "# calibration", "# localizer"], 10.0)
+            line = board.wait_for(["# orientation", "# the sensor moved", "# result:", "# calibration", "# localizer"], 15.0)
             if line is None:
                 print("ボードからの応答がありません。")
                 return False
@@ -136,9 +141,16 @@ def calibrate(board):
                 if "FAILED" in line:
                     print("フラッシュへの保存に失敗しました。")
                     return False
+                if "gyro bias not determined" in line:
+                    print("角速度バイアスは求まりませんでした（加速度バイアスのみ保存）。6つの向きを確認してやり直してください。")
+                # the earth-rotation check follows the result line
+                while True:
+                    extra = board.wait_for(["# vertical earth rate", "# localizer restarting"], 3.0)
+                    if extra is None or extra.startswith("# localizer restarting"):
+                        break
+                    print("  " + extra)
                 print("較正完了。値はフラッシュに保存され、次回起動から自動で使われます。")
                 print("SubCore1 が再較正するので、センサを15秒間静止させてください。")
-                board.wait_for(["# localizer restarting"], 3.0)
                 return True
             if line.startswith("# calibration aborted"):
                 print("較正は保存されませんでした。6つの向きが互いに異なっていたか確認して、やり直してください。")
@@ -174,7 +186,8 @@ def main():
         print("現在の保存値:")
         show_preset(board)
         print()
-        print("6姿勢の較正を始めます。各姿勢で指示どおりに置いて静止させ、Enter を押してください。")
+        print("角速度バイアスは温度で変わります。電源投入から30分ほど置いてIMUの温度が安定してから較正してください。")
+        print("6姿勢の較正を始めます。各姿勢で指示どおりに置いて静止させ、Enter を押してください（各10秒）。")
         ok = calibrate(board)
         if ok:
             print()
