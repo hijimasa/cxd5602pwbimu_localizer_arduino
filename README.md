@@ -70,7 +70,15 @@ IMU samples cross the core boundary through a 256-entry ring buffer (about 133 m
    git clone -c core.symlinks=true --recursive https://github.com/hijimasa/cxd5602pwbimu_localizer_arduino.git
    ```
 
-   Cloning this way has been confirmed to produce real links that arduino-cli and the Arduino IDE follow, so everything builds and uploads natively (the serial port is `COMx` for the IDE and the Python tools). A checkout made without this option cannot be repaired by changing the setting afterwards; clone again. The host tests (`make`, g++) need WSL or MSYS2; WSL can also build and upload, but then the USB-serial bridge has to be attached to WSL with usbipd-win.
+   With real links arduino-cli and the Arduino IDE build and upload natively (the serial port is `COMx` for the IDE and the Python tools). Check the link to the submodule, which is the one that matters: `cmd /c dir SubCore1\src` must list `Fusion` as `<SYMLINKD>` (a directory link). Git for Windows turns a link into a *file* link when its target does not exist yet, and with `--recursive` the submodule is populated after the links are created; `.gitattributes` marks `SubCore1/src/Fusion` as `symlink=dir` to prevent this, but a clone made before that attribute existed, or without `core.symlinks=true`, shows `<SYMLINK>` instead and the build fails with `../Fusion/Fusion.h: No such file or directory`. Repair it by recreating the link now that the submodule exists:
+
+   ```powershell
+   git config core.symlinks true
+   Remove-Item SubCore1\src\Fusion
+   git checkout -- SubCore1/src/Fusion
+   ```
+
+   If the header links in the repository root are text files too, run `git checkout -- .` after setting `core.symlinks` (or clone again). The host tests (`make`, g++) need WSL or MSYS2; WSL can also build and upload, but then the USB-serial bridge has to be attached to WSL with usbipd-win.
 
 2. **Install the Spresense board package:**
 
@@ -354,7 +362,7 @@ Add TF and Pose displays in RViz to visualize the sensor data.
 
 3. **Compile errors:**
    - Run `git submodule update --init` (`SubCore1/src/Fusion` points into the submodule)
-   - On Windows, check that the symbolic links are real: `SubCore1/src/Fusion` must be a folder, not a text file. If not, clone again with `git clone -c core.symlinks=true --recursive` after enabling Developer Mode (see Installation)
+   - `../Fusion/Fusion.h: No such file or directory` on Windows: `SubCore1/src/Fusion` is not a directory link. `cmd /c dir SubCore1\src` must show `<SYMLINKD>`; if it shows `<SYMLINK>` or a plain file, recreate the link as described under Installation
    - Check that the Spresense board package is installed
    - Check that the correct core is selected in the Tools menu
 

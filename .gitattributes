@@ -1,0 +1,6 @@
+# Git for Windows creates a symbolic link to a directory as a *file* link when
+# the target does not exist at checkout time. With --recursive the submodule is
+# populated after the links, so SubCore1/src/Fusion would come out as a file
+# link that the compiler cannot enter ("../Fusion/Fusion.h: No such file").
+# Force the directory type (honoured when core.symlinks=true).
+SubCore1/src/Fusion symlink=dir

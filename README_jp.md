@@ -70,7 +70,15 @@
    git clone -c core.symlinks=true --recursive https://github.com/hijimasa/cxd5602pwbimu_localizer_arduino.git
    ```
 
-   この方法で本物のリンクが作られ、arduino-cli と Arduino IDE がそれを辿ってビルド・書き込みまでネイティブで行えることを確認しています（シリアルポートは IDE も Python ツールも `COMx` を指定）。このオプションなしで取り出したものは後から設定を変えても直らないので、クローンし直してください。ホスト側のテスト（make と g++）は WSL か MSYS2 が必要です。WSL でビルドと書き込みをすることもできますが、その場合は usbipd-win で USB シリアルブリッジを WSL にアタッチする必要があります。
+   本物のリンクがあれば arduino-cli と Arduino IDE はそれを辿り、ビルドから書き込みまでネイティブで行えます（シリアルポートは IDE も Python ツールも `COMx` を指定）。重要なのはサブモジュールへのリンクです。`cmd /c dir SubCore1\src` で `Fusion` が `<SYMLINKD>`（ディレクトリリンク）と表示されることを確認してください。Git for Windows はリンク作成時にリンク先が存在しないと「ファイル型」のリンクを作ります。`--recursive` ではサブモジュールの展開がリンク作成より後なので、これが起きます。`.gitattributes` で `SubCore1/src/Fusion` に `symlink=dir` を指定して防いでいますが、この指定が入る前のクローンや `core.symlinks=true` なしのクローンでは `<SYMLINK>` になり、ビルドが `../Fusion/Fusion.h: No such file or directory` で失敗します。サブモジュールが展開済みの状態でリンクを作り直せば直ります：
+
+   ```powershell
+   git config core.symlinks true
+   Remove-Item SubCore1\src\Fusion
+   git checkout -- SubCore1/src/Fusion
+   ```
+
+   リポジトリ直下のヘッダのリンクもテキストファイルになっている場合は、`core.symlinks` を設定した後に `git checkout -- .` を実行するか、クローンし直してください。ホスト側のテスト（make と g++）は WSL か MSYS2 が必要です。WSL でビルドと書き込みをすることもできますが、その場合は usbipd-win で USB シリアルブリッジを WSL にアタッチする必要があります。
 
 2. **Spresense Arduino ボードパッケージのインストール:**
 
@@ -358,7 +366,7 @@ RVizでTFとPoseディスプレイを追加することで、センサデータ�
 
 3. **コンパイルエラー:**
    - `git submodule update --init` を実行済みか確認（`SubCore1/src/Fusion` がサブモジュールを指します）
-   - Windows ではシンボリックリンクが本物か確認してください。`SubCore1/src/Fusion` がテキストファイルではなくフォルダであれば正常です。違う場合は開発者モードを有効にして `git clone -c core.symlinks=true --recursive` でクローンし直してください（インストールの項を参照）
+   - Windows で `../Fusion/Fusion.h: No such file or directory` が出る場合、`SubCore1/src/Fusion` がディレクトリリンクになっていません。`cmd /c dir SubCore1\src` で `<SYMLINKD>` と表示されるのが正常で、`<SYMLINK>` や通常のファイルならインストールの項の手順でリンクを作り直してください
    - Spresenseボードパッケージが正しくインストールされていることを確認
    - ツールメニューで正しいコアが選択されていることを確認
 
