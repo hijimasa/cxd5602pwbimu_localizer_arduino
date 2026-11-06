@@ -81,7 +81,7 @@ public:
   const LocalizerDiagnostics &diagnostics() const { return diag_; }
   Vec3 accelBias() const { return accelBias_; }
 
-  /** Current run-time gyro offset estimate (rad/s), tracked by FusionOffset. */
+  /** Current run-time gyro offset estimate (rad/s), tracked by FusionBias. */
   Vec3 gyroOffsetEstimate() const;
   uint32_t calibrationProgress() const { return alignmentAccumulator_.sampleCount(); }
   uint32_t calibrationRequired() const { return alignmentAccumulator_.requiredSamples(); }
@@ -151,7 +151,7 @@ private:
   CausalGaussianFilter accelFilter_[3];
   CausalGaussianFilter gyroFilter_[3];
   FusionAhrs ahrs_;
-  FusionOffset offset_;
+  FusionBias bias_;
   ZuptDetector zupt_;
   VelocityIntegrator integrator_;
 

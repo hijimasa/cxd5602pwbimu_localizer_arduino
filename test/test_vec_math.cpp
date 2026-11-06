@@ -27,7 +27,7 @@ TEST(vec_math_rotation_matches_fusion_matrix)
     fq.element.w = q.w; fq.element.x = q.x; fq.element.y = q.y; fq.element.z = q.z;
     const FusionMatrix m = FusionQuaternionToMatrix(fq);
     const FusionVector fv = {{v.x, v.y, v.z}};
-    const FusionVector fr = FusionMatrixMultiplyVector(m, fv);
+    const FusionVector fr = FusionMatrixMultiply(m, fv);
     CHECK_NEAR(r.x, fr.axis.x, 1e-5);
     CHECK_NEAR(r.y, fr.axis.y, 1e-5);
     CHECK_NEAR(r.z, fr.axis.z, 1e-5);

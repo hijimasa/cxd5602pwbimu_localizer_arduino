@@ -54,7 +54,13 @@
 #define FUSION_AMBIGUOUS_TIMEOUT (2 * LOCALIZER_SAMPLE_RATE) // samples (2 s)
 #define FUSION_GYRO_RANGE 2000.0f
 #define FUSION_ACCEL_REJECTION 10.0f
-#define FUSION_RECOVERY_TRIGGER_PERIOD (5 * LOCALIZER_SAMPLE_RATE)
+#define FUSION_REJECTION_TIMEOUT 5.0f    // s, acceleration recovery trigger timeout
+
+// ---- Fusion run-time gyro offset tracker (FusionBias) ----------------------
+// The offset is only updated after the rate has stayed below the threshold
+// for the stationary period (the values the former FusionOffset hard-coded).
+#define FUSION_BIAS_STATIONARY_THRESHOLD 3.0f // deg/s
+#define FUSION_BIAS_STATIONARY_PERIOD 5.0f    // s
 
 // ---- ZUPT (zero velocity update) detection ---------------------------------
 // Two conditions over a short window, both must hold for ZUPT_REQUIRED_SAMPLES:

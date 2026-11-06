@@ -26,15 +26,22 @@ void Localizer::reset()
     gyroFilter_[i].reset();
   }
 
-  FusionOffsetInitialise(&offset_, LOCALIZER_SAMPLE_RATE);
+  FusionBiasInitialise(&bias_);
+  const FusionBiasSettings biasSettings = {
+      .sampleRate = (float)LOCALIZER_SAMPLE_RATE,
+      .stationaryThreshold = FUSION_BIAS_STATIONARY_THRESHOLD,
+      .stationaryPeriod = FUSION_BIAS_STATIONARY_PERIOD,
+  };
+  FusionBiasSetSettings(&bias_, &biasSettings);
   FusionAhrsInitialise(&ahrs_);
   const FusionAhrsSettings settings = {
+      .sampleRate = (float)LOCALIZER_SAMPLE_RATE,
       .convention = FusionConventionNwu,
       .gain = FUSION_AHRS_GAIN,
       .gyroscopeRange = FUSION_GYRO_RANGE,
       .accelerationRejection = FUSION_ACCEL_REJECTION,
       .magneticRejection = 0.0f,
-      .recoveryTriggerPeriod = FUSION_RECOVERY_TRIGGER_PERIOD,
+      .rejectionTimeout = FUSION_REJECTION_TIMEOUT,
   };
   FusionAhrsSetSettings(&ahrs_, &settings);
   currentGain_ = FUSION_AHRS_GAIN;
@@ -68,9 +75,8 @@ void Localizer::reset()
 
 Vec3 Localizer::gyroOffsetEstimate() const
 {
-  return vec3(offset_.gyroscopeOffset.axis.x * DEG_TO_RAD_F,
-              offset_.gyroscopeOffset.axis.y * DEG_TO_RAD_F,
-              offset_.gyroscopeOffset.axis.z * DEG_TO_RAD_F);
+  const FusionVector offset = FusionBiasGetOffset(&bias_);
+  return vec3(offset.axis.x * DEG_TO_RAD_F, offset.axis.y * DEG_TO_RAD_F, offset.axis.z * DEG_TO_RAD_F);
 }
 
 bool Localizer::update(const ImuSample &rawSample)
@@ -95,20 +101,20 @@ void Localizer::startRunning(const ImuSample &sample)
                                              hasGyroBiasPreset_ ? &gyroBiasPreset_ : 0);
 
   // Seed the AHRS with the aligned attitude and skip Fusion's own
-  // initialisation ramp (the attitude is already known).
+  // start-up gain ramp (the attitude is already known).
   FusionQuaternion q;
   q.element.w = alignment_.quaternion.w;
   q.element.x = alignment_.quaternion.x;
   q.element.y = alignment_.quaternion.y;
   q.element.z = alignment_.quaternion.z;
   FusionAhrsSetQuaternion(&ahrs_, q);
-  ahrs_.initialising = false;
-  ahrs_.rampedGain = FUSION_AHRS_GAIN;
+  FusionAhrsSkipStartup(&ahrs_);
 
   // Seed the run-time gyro offset tracker (deg/s) with the measured offset.
-  offset_.gyroscopeOffset.axis.x = alignment_.gyroOffset.x * RAD_TO_DEG_F;
-  offset_.gyroscopeOffset.axis.y = alignment_.gyroOffset.y * RAD_TO_DEG_F;
-  offset_.gyroscopeOffset.axis.z = alignment_.gyroOffset.z * RAD_TO_DEG_F;
+  const FusionVector offset = {{alignment_.gyroOffset.x * RAD_TO_DEG_F,
+                                alignment_.gyroOffset.y * RAD_TO_DEG_F,
+                                alignment_.gyroOffset.z * RAD_TO_DEG_F}};
+  FusionBiasSetOffset(&bias_, offset);
 
   accelBias_ = alignment_.accelBias;
 
@@ -125,14 +131,15 @@ void Localizer::applyAhrsGain(float gain)
     return;
   }
   const FusionAhrsSettings settings = {
+      .sampleRate = (float)LOCALIZER_SAMPLE_RATE,
       .convention = FusionConventionNwu,
       .gain = gain,
       .gyroscopeRange = FUSION_GYRO_RANGE,
       .accelerationRejection = FUSION_ACCEL_REJECTION,
       .magneticRejection = 0.0f,
-      .recoveryTriggerPeriod = FUSION_RECOVERY_TRIGGER_PERIOD,
+      .rejectionTimeout = FUSION_REJECTION_TIMEOUT,
   };
-  FusionAhrsSetSettings(&ahrs_, &settings); // initialising is false: rampedGain = gain
+  FusionAhrsSetSettings(&ahrs_, &settings); // start-up is over: the gain applies at once
   currentGain_ = gain;
 }
 
@@ -188,12 +195,13 @@ void Localizer::processRunning(const ImuSample &sample)
 
   // 3. Run-time gyro offset tracking (Fusion works in deg/s)
   FusionVector gyroscope = {{gyroComp.x * RAD_TO_DEG_F, gyroComp.y * RAD_TO_DEG_F, gyroComp.z * RAD_TO_DEG_F}};
-  gyroscope = FusionOffsetUpdate(&offset_, gyroscope);
+  gyroscope = FusionBiasUpdate(&bias_, gyroscope);
 
   // 4. AHRS update (accelerometer in g, without bias correction so the
   //    attitude tracks the measured gravity direction)
   const FusionVector accelerometer = {{accelF.x / LOCALIZER_GRAVITY, accelF.y / LOCALIZER_GRAVITY, accelF.z / LOCALIZER_GRAVITY}};
-  FusionAhrsUpdateNoMagnetometer(&ahrs_, gyroscope, accelerometer, dt);
+  FusionAhrsSetSamplePeriod(&ahrs_, dt); // measured dt (SetSettings resets it to the nominal value)
+  FusionAhrsUpdateNoMagnetometer(&ahrs_, gyroscope, accelerometer);
 
   const FusionQuaternion fq = FusionAhrsGetQuaternion(&ahrs_);
   Quat q = {fq.element.w, fq.element.x, fq.element.y, fq.element.z};

@@ -170,7 +170,7 @@ TEST(localizer_tilted_start_with_noise)
 TEST(localizer_earth_rate_compensation_keeps_gyro_offset_clean)
 {
   // Stationary, noisy but bias-free gyro. Without compensation the run-time
-  // offset tracker (FusionOffset) absorbs the earth rotation (~0.0042 deg/s
+  // offset tracker (FusionBias) absorbs the earth rotation (~0.0042 deg/s
   // in total) as if it were sensor bias, which becomes wrong after any
   // rotation. With compensation the tracked offset must stay near zero.
   SimConfig cfg = realisticNoise();

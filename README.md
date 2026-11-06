@@ -246,7 +246,7 @@ cxd5602pwbimu_localizer_arduino/
 1. **dt:** from the IMU timestamp difference (32-bit wrap safe). Values above 1.5× nominal are counted as anomalies, values above 10× are clamped
 2. **Gaussian filter:** causal, σ = 2 samples, largest weight on the current sample
 3. **Earth-rate compensation:** the earth rotation vector is rotated into the sensor frame with the current attitude and subtracted from the angular rate
-4. **Gyro offset tracking:** FusionOffset, seeded with the alignment result
+4. **Gyro offset tracking:** FusionBias (offset updated only after 5 s below 3 °/s), seeded with the alignment result
 5. **AHRS update:** Fusion (acceleration rejection 10°, gain scheduled in 7b)
 6. **Gravity removal and bias correction** in the sensor frame, then rotation into the Earth frame
 7. **ZUPT:** stationary when, over a 16-sample window, the variance is below the thresholds and the mean acceleration is below 0.1 m/s² and the mean angular rate below 2 °/s, for 96 consecutive samples (50 ms). While the estimated speed exceeds 0.1 m/s, 1 s of continuous stillness is required instead (a short constant-velocity phase in the middle of a move must not be taken for a stop). Leaving is immediate
