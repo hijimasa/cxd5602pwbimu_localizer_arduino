@@ -165,6 +165,15 @@ class ViewerTests(unittest.TestCase):
         for a, b in imu_viewer.BOX_EDGES:
             self.assertEqual(int(np.sum(v[a] != v[b])), 1)  # every edge changes exactly one coordinate
 
+    def test_sensor_box_is_long_along_body_y(self):
+        sx, sy, sz = imu_viewer.BOX_SIZE_XYZ
+        self.assertGreater(sy, sx)
+        self.assertGreater(sx, sz)
+        v = imu_viewer.box_vertices(*(0.1 * f for f in imu_viewer.BOX_SIZE_XYZ))
+        extent = v.max(axis=0) - v.min(axis=0)
+        self.assertAlmostEqual(extent[1], 0.1)
+        self.assertLess(extent[0], extent[1])
+
 
 if __name__ == "__main__":
     unittest.main()

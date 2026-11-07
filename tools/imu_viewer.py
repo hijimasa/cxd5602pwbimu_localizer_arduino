@@ -4,7 +4,7 @@
 Draws, in a software-rendered 3D view (no OpenGL, no Qt):
   * the origin frame (N red, W green, U blue) - the frame the pose is
     expressed in; press z to move it to the current pose, Z to reset it,
-  * the current sensor pose as a box with its body axes,
+  * the current sensor pose as a box (long side along body y, as on the board) with its body axes,
   * the path since start (press c to clear) and a drop line to the ground,
 and next to it the numbers: position, velocity, attitude, the pose relative
 to the origin frame, and strip charts of acceleration and angular rate.
@@ -152,9 +152,14 @@ def transform_points(local, rot, pos, out):
 
 # ---- geometry --------------------------------------------------------------
 
-def box_vertices(length, width, height):
-    hl, hw, hh = length / 2, width / 2, height / 2
-    return np.array([[sx * hl, sy * hw, sz * hh] for sz in (-1, 1) for sy in (-1, 1) for sx in (-1, 1)], dtype=np.float64)
+def box_vertices(size_x, size_y, size_z):
+    """Corners of a box centred on the body origin with the given extents along body x, y, z."""
+    hx, hy, hz = size_x / 2, size_y / 2, size_z / 2
+    return np.array([[sx * hx, sy * hy, sz * hz] for sz in (-1, 1) for sy in (-1, 1) for sx in (-1, 1)], dtype=np.float64)
+
+
+# The CXD5602PWBIMU board is long along its body y axis; x spans the short side.
+BOX_SIZE_XYZ = (0.4, 1.0, 0.1)
 
 
 BOX_EDGES = [(0, 1), (1, 3), (3, 2), (2, 0), (4, 5), (5, 7), (7, 6), (6, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
@@ -223,7 +228,7 @@ class Viewer:
         self.drawn_n = 0       # path points whose chunk coordinates are current
         self.view_key = None
         self.static_key = None # view + origin for which the grid and origin frame are current
-        self.box_local = box_vertices(size, size * 0.4, size * 0.1)
+        self.box_local = box_vertices(*(size * f for f in BOX_SIZE_XYZ))
         self.box_world = np.zeros_like(self.box_local)
         self.axes_local = np.array([[0, 0, 0], [size, 0, 0], [0, size, 0], [0, 0, size]], dtype=np.float64)
         self.axes_world = np.zeros_like(self.axes_local)
@@ -578,7 +583,7 @@ class StripChart:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     imu_stream.add_source_arguments(ap)
-    ap.add_argument("--size", type=float, default=0.1, help="length of the drawn sensor box and axes (m)")
+    ap.add_argument("--size", type=float, default=0.1, help="length of the drawn sensor box (along body y) and axes (m)")
     ap.add_argument("--duration", type=float, default=0.0, help="close after this many seconds (0 = until q)")
     ap.add_argument("--snapshot", help="save the 3D view as PostScript when closing")
     args = ap.parse_args()
