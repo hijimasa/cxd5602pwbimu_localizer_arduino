@@ -141,6 +141,7 @@ The algorithm can be tested on a host PC:
 cd test
 make                      # build and run all tests
 make run ARGS=localizer   # run only tests whose name contains "localizer"
+make tools-test           # unit tests of the Python tools (parser, projection, dashboard widgets)
 ```
 
 The suite covers:
@@ -243,6 +244,10 @@ cxd5602pwbimu_localizer_arduino/
 ├── tools/
 │   ├── record_raw.py                     # record raw device data
 │   ├── analyze_replay.py                 # segment analysis of a replay CSV
+│   ├── imu_stream.py                     # serial / file / CSV input shared by the viewers
+│   ├── imu_monitor.py                    # terminal dashboard
+│   ├── imu_viewer.py                     # tkinter 3D viewer (numba kernels)
+│   ├── test_imu_tools.py                 # unit tests of the tools (python3 -m unittest)
 │   ├── calibrate_accel_bias.py           # interactive six-orientation calibration
 │   └── usb_reset_cp210x.py               # recover a locked-up USB-serial bridge
 └── Fusion/                               # Fusion library (submodule)
@@ -324,6 +329,29 @@ Main parameters in `SubCore1/src/localizer/localizer_config.h`:
 | `IMU_NOTIFY_INTERVAL` (shared_types.h) | 8 | samples between wake-up notifications to SubCore1 (the receive FIFO has only 8 buffers) |
 
 ## Visualization
+
+Two stand-alone tools in `tools/` show the serial output of the normal build live. Both take the same inputs: a serial port (`--port /dev/ttyUSB0`, `COM3` on Windows), a text file of saved serial lines (`--file`) or a replay CSV from `test/replay --csv` (`--csv`), the files being replayed at their recorded pace (`--speed 5`, `--fast`). Opening the port resets the board, so the first 15 s are the stationary calibration and nothing is shown until the first estimate arrives. Dependencies: `pip install pyserial numpy` (and `numba` for the viewer, optional).
+
+### Terminal monitor
+
+```bash
+python3 tools/imu_monitor.py --port /dev/ttyUSB0
+python3 tools/imu_monitor.py --csv replay.csv --speed 5
+python3 tools/imu_monitor.py --port /dev/ttyUSB0 --dump > log.csv   # decoded CSV instead of the dashboard
+```
+
+A dashboard redrawn in place with ANSI escape codes (no curses, works in Windows Terminal): attitude, angular rate, acceleration, velocity and position with bars, the ZUPT state (the velocity is exactly zero while stationary), sparklines of |a| and |ω| over the last 20 s, an ASCII top view of the path (north up, west left) and the last board messages. `--dump` prints one decoded line per sample instead, for logging or piping.
+
+### 3D viewer (GUI)
+
+```bash
+python3 tools/imu_viewer.py --port /dev/ttyUSB0
+python3 tools/imu_viewer.py --csv replay.csv --speed 5
+```
+
+A tkinter window (no Qt or OpenGL needed) with a software-rendered 3D view: the **origin frame** (N red, W green, U blue), the **current sensor pose** as a box with its body axes, the path since start and a drop line to the ground grid, next to the numbers (position, velocity, attitude, angular rate, acceleration), the pose **relative to the origin frame** and strip charts of acceleration and angular rate. Mouse: left drag orbits, right drag pans, wheel zooms. Keys: `r` frames the whole path, `f` follows the sensor, `z` moves the origin frame to the current pose (the relative pose then counts from there), `Z` resets it, `c` clears the path, space pauses, `q` quits.
+
+The per-frame numerics (rotation of the geometry, perspective projection of up to 20 000 path points, reduction of the path to the points that are at least one pixel apart on screen) run in numba-compiled kernels when numba is installed and fall back to numpy otherwise; the kernels are compiled once and cached under `tools/__pycache__`. The canvas keeps its items and only updates their coordinates, so a frame with a 20 000-point path takes a few milliseconds on a laptop (the title line shows the render time).
 
 ### ROS 2 integration
 

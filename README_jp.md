@@ -141,6 +141,7 @@ timestamp, temp, gx, gy, gz, ax, ay, az, qw, qx, qy, qz, vx, vy, vz, px, py, pz
 cd test
 make            # ビルドして全テストを実行
 make run ARGS=localizer   # 名前に localizer を含むテストだけ実行
+make tools-test           # Pythonツールの単体テスト（パーサ、投影、ダッシュボード部品）
 ```
 
 テストの内容：
@@ -243,6 +244,10 @@ cxd5602pwbimu_localizer_arduino/
 ├── tools/
 │   ├── record_raw.py                     # 実機の生データ記録
 │   ├── analyze_replay.py                 # 再生CSVの区間解析
+│   ├── imu_stream.py                     # ビューア共通のシリアル/ファイル/CSV入力
+│   ├── imu_monitor.py                    # ターミナルのダッシュボード
+│   ├── imu_viewer.py                     # tkinter 3Dビューア（numbaカーネル）
+│   ├── test_imu_tools.py                 # ツールの単体テスト（python3 -m unittest）
 │   ├── calibrate_accel_bias.py           # 6姿勢較正の対話スクリプト
 │   └── usb_reset_cp210x.py               # 固まったUSBシリアルブリッジの復旧
 └── Fusion/                               # Fusionライブラリ（サブモジュール）
@@ -324,6 +329,29 @@ cxd5602pwbimu_localizer_arduino/
 | `IMU_NOTIFY_INTERVAL`（shared_types.h） | 8 | SubCore1を起こす通知の間隔（サンプル数）。受信FIFOは8個しかないため頻度を抑える |
 
 ## 可視化
+
+通常ビルドのシリアル出力をその場で表示する独立したツールを `tools/` に2つ用意しています。入力はどちらも共通で、シリアルポート（`--port /dev/ttyUSB0`、Windows では `COM3`）、保存したシリアル出力のテキストファイル（`--file`）、`test/replay --csv` の再生CSV（`--csv`）を受け付け、ファイルは記録時の速さで再生します（`--speed 5`、`--fast`）。ポートを開くとボードがリセットされるため、最初の15秒は静止較正で、最初の推定値が届くまで何も表示されません。依存パッケージは `pip install pyserial numpy`（ビューアは任意で `numba`）です。
+
+### ターミナルモニタ
+
+```bash
+python3 tools/imu_monitor.py --port /dev/ttyUSB0
+python3 tools/imu_monitor.py --csv replay.csv --speed 5
+python3 tools/imu_monitor.py --port /dev/ttyUSB0 --dump > log.csv   # ダッシュボードの代わりにデコード済みCSVを出力
+```
+
+ANSIエスケープで同じ場所を描き直すダッシュボードです（curses 不要、Windows Terminal でも動作）。姿勢・角速度・加速度・速度・位置をバー付きで表示し、ZUPT状態（静止中は速度がちょうど0になる）、直近20秒の |a| と |ω| のスパークライン、経路のASCII上面図（北が上、西が左）、ボードからのメッセージを出します。`--dump` はデコードした値を1サンプル1行で出力するので、記録やパイプに使えます。
+
+### 3Dビューア（GUI）
+
+```bash
+python3 tools/imu_viewer.py --port /dev/ttyUSB0
+python3 tools/imu_viewer.py --csv replay.csv --speed 5
+```
+
+tkinter のウィンドウ（Qt も OpenGL も不要）にソフトウェア描画の3Dビューを表示します。**原点座標系**（N 赤、W 緑、U 青）、**現在のセンサ姿勢**（本体軸付きの箱）、起動からの経路、地面グリッドへの垂線を描き、横に数値（位置・速度・姿勢・角速度・加速度）、**原点座標系に対する相対姿勢**、加速度と角速度のストリップチャートを並べます。マウスは左ドラッグで回転、右ドラッグで平行移動、ホイールでズーム。キーは `r` で経路全体を表示、`f` でセンサに追従、`z` で原点座標系を現在の姿勢に移動（以後の相対姿勢はそこ基準）、`Z` で原点を戻す、`c` で経路を消去、スペースで一時停止、`q` で終了です。
+
+フレームごとの数値計算（形状の回転、最大2万点の経路の透視投影、画面上で1ピクセル以上離れた点だけへの間引き）は numba が入っていれば JIT コンパイルしたカーネルで、なければ numpy で実行します。カーネルは一度コンパイルすると `tools/__pycache__` にキャッシュされます。キャンバスの図形は作り直さず座標だけ更新するので、2万点の経路でも1フレーム数ミリ秒です（タイトル行に描画時間を表示します）。
 
 ### ROS 2連携
 

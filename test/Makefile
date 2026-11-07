@@ -3,6 +3,7 @@
 #   make build  build only
 #   make clean
 # Optional: make run ARGS=<substring> to run a subset of tests.
+#   make tools-test   unit tests of the Python tools in ../tools
 
 CXX ?= g++
 CC ?= gcc
@@ -23,8 +24,11 @@ TEST_OBJS := $(patsubst %.cpp,$(BUILD)/%.o,$(TEST_SRCS))
 TARGET := $(BUILD)/run_tests
 REPLAY := $(BUILD)/replay
 
-.PHONY: all build run clean replay
+.PHONY: all build run clean replay tools-test
 all: run
+
+tools-test:
+	python3 -m unittest discover -s ../tools -p 'test_*.py'
 
 build: $(TARGET) $(REPLAY)
 
