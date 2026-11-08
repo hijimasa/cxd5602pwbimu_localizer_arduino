@@ -25,23 +25,6 @@ void VelocityIntegrator::reset()
   correctionCount_ = 0;
 }
 
-static Vec3 rotateZ(Vec3 v, float c, float s)
-{
-  return vec3(c * v.x - s * v.y, s * v.x + c * v.y, v.z);
-}
-
-void VelocityIntegrator::rotateAboutUp(float angle)
-{
-  const float c = cosf(angle), s = sinf(angle);
-  velocity_ = rotateZ(velocity_, c, s);
-  position_ = rotateZ(position_, c, s);
-  oldAccel_ = rotateZ(oldAccel_, c, s);
-  oldVelocity_ = rotateZ(oldVelocity_, c, s);
-  pendingCorrection_ = rotateZ(pendingCorrection_, c, s);
-  lastCorrection_ = rotateZ(lastCorrection_, c, s);
-  lastVelocityError_ = rotateZ(lastVelocityError_, c, s);
-}
-
 void VelocityIntegrator::update(Vec3 earthAccel, float dt, bool stationary, float stillTime)
 {
   if (!initialised_)

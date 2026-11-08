@@ -40,13 +40,6 @@ public:
   Vec3 velocity() const { return velocity_; }
   Vec3 position() const { return position_; }
 
-  /**
-   * Rotate the Earth frame about Up by angle (rad): the integrated
-   * velocity, position and pending corrections turn with it (heading
-   * correction by the heading observer).
-   */
-  void rotateAboutUp(float angle);
-
   void setRetroactiveCorrection(bool enabled) { retroactive_ = enabled; }
   /** Blend duration in seconds (0 = apply corrections instantly). */
   void setCorrectionBlendTime(float seconds) { blendTime_ = seconds; }

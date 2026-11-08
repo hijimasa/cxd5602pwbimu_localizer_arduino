@@ -66,7 +66,6 @@ void HeadingObserver::clearCurrent()
 void HeadingObserver::reset(Vec3 biasPrior, float latitudeDeg, float earthRate)
 {
   count_ = 0;
-  next_ = 0;
   clearCurrent();
   prior_ = biasPrior;
   const float lat = latitudeDeg * LOCALIZER_PI / 180.0f;
@@ -158,6 +157,9 @@ void HeadingObserver::endPeriod(Quat attitude)
     }
   }
   clearCurrent();
+  // A correction is only applied on the strength of a fit that includes
+  // the rest in progress: whatever was left is dropped with the motion.
+  status_.yawPending = 0.0f;
 }
 
 void HeadingObserver::addPeriod(Vec3 meanGyro, float duration, Quat attitude)
@@ -177,13 +179,33 @@ bool HeadingObserver::storePeriod(Vec3 mean, float duration, Quat attitude)
     status_.rejectedPeriods++;
     return false;
   }
-  Period &p = periods_[next_];
+  int slot = count_;
+  if (count_ >= HEADING_OBSERVER_PERIODS)
+  {
+    // full: replace the period that contributes least (short or old), so
+    // that a long rest such as the alignment is not pushed out by a run of
+    // brief stops
+    slot = 0;
+    float lightest = periodWeight(periods_[0].duration, periods_[0].age);
+    for (int i = 1; i < count_; i++)
+    {
+      const float w = periodWeight(periods_[i].duration, periods_[i].age);
+      if (w < lightest)
+      {
+        lightest = w;
+        slot = i;
+      }
+    }
+  }
+  else
+  {
+    count_++;
+  }
+  Period &p = periods_[slot];
   p.mean = mean;
   p.duration = duration;
   p.age = 0.0f;
   p.attitude = attitude;
-  next_ = (next_ + 1) % HEADING_OBSERVER_PERIODS;
-  if (count_ < HEADING_OBSERVER_PERIODS) count_++;
   status_.periods = count_;
   const Vec3 r = vec3Sub(mean, status_.bias);
   status_.rateMagnitude = vec3Norm(r);

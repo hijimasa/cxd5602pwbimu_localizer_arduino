@@ -65,7 +65,8 @@
 // ---- Heading observer (gyro-compass re-estimation at rest) -----------------
 // Needs the gyro bias preset. The gyro means of the recent stationary
 // periods are fitted for bias and heading (heading_observer.h); the result
-// is applied as a slow rotation about Up. Each period is weighted by its
+// is applied as a slow rotation of the attitude about Up (the position is
+// never touched). Each period is weighted by its
 // length relative to the noise of a HEADING_OBSERVER_NOISE_PERIOD mean, the
 // preset is a prior with HEADING_OBSERVER_PRESET_SIGMA. Periods are not
 // trusted beyond HEADING_OBSERVER_MAX_PERIOD (bias instability) and lose
@@ -81,7 +82,7 @@
 #define HEADING_OBSERVER_MAX_RESIDUAL (0.03f * LOCALIZER_PI / 180.0f)  // rad/s, |mean - bias| above this was not a rest
 #define HEADING_OBSERVER_SOLVE_INTERVAL (LOCALIZER_SAMPLE_RATE / 2)    // samples between fits while at rest (0.5 s)
 #define HEADING_OBSERVER_CORRECTION_TIME 5.0f    // s, time constant of the applied rotation
-#define HEADING_OBSERVER_MAX_RATE (15.0f * LOCALIZER_PI / 180.0f)      // rad/s, slew limit of the applied rotation
+#define HEADING_OBSERVER_MAX_RATE (5.0f * LOCALIZER_PI / 180.0f)       // rad/s, slew limit of the applied rotation
 // The ZUPT detector confirms a rest while the last fraction of a degree of
 // a turn is still settling and notices the next motion only after its
 // window, so the first HEADING_OBSERVER_HEAD_SAMPLES and the last

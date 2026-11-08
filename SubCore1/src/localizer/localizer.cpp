@@ -283,19 +283,25 @@ void Localizer::processRunning(const ImuSample &sample)
   integrator_.update(earthAccel, dt, stationary, zupt_.stillSamples() * LOCALIZER_NOMINAL_DT);
 
   // 9. Heading observer: fit bias and heading from the rest periods and
-  //    turn the frame (attitude and path) slowly about Up
+  //    turn the attitude slowly about Up. The integrated position is left
+  //    alone on purpose: a robot acting on it must not see it move while
+  //    the sensor rests, even though the path integrated before a large
+  //    correction then stays in the old frame.
   if (observer)
   {
     headingObserver_.advance(dt);
     if (stationary)
     {
       headingObserver_.addStationary(gyroF, dt);
-      if (++observerSolveCounter_ >= HEADING_OBSERVER_SOLVE_INTERVAL)
+      // Solve every interval once the rest is long enough to count; a
+      // brief ZUPT during a slow move must not move the heading.
+      const bool usable = headingObserver_.currentPeriodTime() >= HEADING_OBSERVER_MIN_PERIOD;
+      if (usable && ++observerSolveCounter_ >= HEADING_OBSERVER_SOLVE_INTERVAL)
       {
         observerSolveCounter_ = 0;
         headingObserver_.solve(q);
       }
-      float delta = headingObserver_.pendingYaw() * dt / HEADING_OBSERVER_CORRECTION_TIME;
+      float delta = usable ? headingObserver_.pendingYaw() * dt / HEADING_OBSERVER_CORRECTION_TIME : 0.0f;
       const float limit = HEADING_OBSERVER_MAX_RATE * dt;
       if (delta > limit) delta = limit;
       if (delta < -limit) delta = -limit;
@@ -304,7 +310,6 @@ void Localizer::processRunning(const ImuSample &sample)
         q = quatNormalise(quatMultiply(quatAboutUp(delta), q));
         const FusionQuaternion fq2 = {{q.w, q.x, q.y, q.z}};
         FusionAhrsSetQuaternion(&ahrs_, fq2);
-        integrator_.rotateAboutUp(delta);
         headingObserver_.applyYaw(delta);
       }
     }

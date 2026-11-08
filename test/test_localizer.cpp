@@ -492,21 +492,21 @@ TEST(localizer_heading_observer_resolves_east_west_after_a_turn)
   // The user's symptom: the y-axis preset is off by 0.006 deg/s, more than
   // the horizontal earth rate, so the alignment with x East reads the
   // mirror image (x West, 180 deg off). After a 180 deg turn and a rest the
-  // observer sees both headings, separates the bias and turns the frame
-  // to the true heading; the path integrated afterwards is right in the
-  // Earth frame, not only relative to the start.
+  // observer sees both headings, separates the bias and turns the attitude
+  // to the true heading (5 deg/s: 176 deg take 35 s); the path integrated
+  // afterwards is right in the Earth frame, not only relative to the start.
   SimConfig cfg = realisticNoise();
   cfg.gyroBias = vec3(1.1e-4f, -0.9e-4f, -4.1e-4f);
   const Vec3 preset = vec3Add(cfg.gyroBias, vec3(0.0f, 0.006f / DEG, 0.0f));
   const Quat xEast = quatFromAxisAngle(vec3(0, 0, 1), -90.0f / DEG);
-  const TrajectoryFn traj = turnThenTranslate(xEast, 25.0, 3.0, 180.0f / DEG, 70.0, 2.0, vec3(0.5f, 0, 0));
+  const TrajectoryFn traj = turnThenTranslate(xEast, 25.0, 3.0, 180.0f / DEG, 80.0, 2.0, vec3(0.5f, 0, 0));
   Localizer with;
   with.setGyroBiasPreset(preset, true);
-  const RunResult a = runSimulation(with, cfg, traj, 80.0);
+  const RunResult a = runSimulation(with, cfg, traj, 90.0);
   Localizer without;
   without.setHeadingObserver(false);
   without.setGyroBiasPreset(preset, true);
-  const RunResult b = runSimulation(without, cfg, traj, 80.0);
+  const RunResult b = runSimulation(without, cfg, traj, 90.0);
   const HeadingObserverStatus &st = with.headingObserver().status();
   METRIC("initial heading error (deg)", a.initialHeadingErrorDeg);
   METRIC("final heading error with observer (deg)", a.finalHeadingErrorDeg);
@@ -524,11 +524,72 @@ TEST(localizer_heading_observer_resolves_east_west_after_a_turn)
   CHECK_LT(150.0f, fabsf(b.finalHeadingErrorDeg));
   CHECK_LT(fabsf(a.finalHeadingErrorDeg), 4.0f);
   CHECK_LT(vec3Norm(vec3Sub(st.bias, cfg.gyroBias)) * DEG, 0.0006f); // three 15-45 s means: about 0.0002 deg/s of noise
-  CHECK_LT(a.finalPositionErrorTrueFrame, 0.05f);
+  CHECK_LT(a.finalPositionErrorTrueFrame, 0.08f); // a few cm from the 180 deg turn itself (see localizer_rotation_then_rest)
   CHECK_LT(0.9f, b.finalPositionErrorTrueFrame); // the mirror image path: about 1 m off
   CHECK_LT(a.maxTiltErrorDeg, 0.5f);
   CHECK(a.stationaryAtEnd);
   CHECK(st.periods >= 2);
+}
+
+TEST(localizer_heading_correction_leaves_the_position_alone)
+{
+  // Design decision: the correction turns the attitude only. A robot acting
+  // on the position must not see it move while the sensor rests, so the
+  // path integrated before the correction is not rotated into the new
+  // frame (it stays where it was; the new frame applies from then on).
+  SimConfig cfg = realisticNoise();
+  cfg.gyroBias = vec3(1.1e-4f, -0.9e-4f, -4.1e-4f);
+  const Vec3 preset = vec3Add(cfg.gyroBias, vec3(0.0f, 0.006f / DEG, 0.0f));
+  const Quat xEast = quatFromAxisAngle(vec3(0, 0, 1), -90.0f / DEG);
+  // 0.5 m move while the heading is still the mirror image, then the turn
+  const TrajectoryFn move = translationTrajectory(xEast, 17.0, 2.0, vec3(0.5f, 0, 0));
+  const TrajectoryFn turn = rotationTrajectory(xEast, 25.0, 3.0, vec3(0, 0, 1), 180.0f / DEG);
+  const TrajectoryFn traj = [=](double t) {
+    TruePose p = t < 25.0 ? move(t) : turn(t);
+    if (t >= 25.0) p.position = vec3(0.5f, 0, 0);
+    return p;
+  };
+  Localizer loc;
+  loc.setGyroBiasPreset(preset, true);
+  ImuSimulator sim(cfg);
+  Vec3 posBeforeTurn = vec3Zero(), posAtRest = vec3Zero();
+  float maxMoveAtRest = 0.0f, headingBefore = 0.0f, headingAfter = 0.0f;
+  bool haveRest = false;
+  const uint64_t N = (uint64_t)(75.0 * LOCALIZER_SAMPLE_RATE);
+  for (uint64_t k = 0; k < N; k++)
+  {
+    TruePose truth;
+    const ImuSample s = sim.sample(k, traj, &truth);
+    if (!loc.update(s)) continue;
+    const double t = (double)k / LOCALIZER_SAMPLE_RATE;
+    const LocalizerState &st = loc.state();
+    if (t < 25.0)
+    {
+      posBeforeTurn = st.position;
+      headingBefore = headingErrorDeg(st.quaternion, truth.attitude);
+    }
+    else if (t > 31.0 && st.stationary) // 3 s after the turn ended: the ZUPT blend is over
+    {
+      if (!haveRest)
+      {
+        posAtRest = st.position;
+        haveRest = true;
+      }
+      const float d = vec3Norm(vec3Sub(st.position, posAtRest));
+      if (d > maxMoveAtRest) maxMoveAtRest = d;
+      headingAfter = headingErrorDeg(st.quaternion, truth.attitude);
+    }
+  }
+  METRIC("heading error before the turn (deg)", headingBefore);
+  METRIC("heading error at the end of the rest (deg)", headingAfter);
+  METRIC("position movement during the rest (m)", maxMoveAtRest);
+  METRIC("position change through the turn (m)", vec3Norm(vec3Sub(posAtRest, posBeforeTurn)));
+  CHECK(haveRest);
+  CHECK_LT(150.0f, fabsf(headingBefore));
+  CHECK_LT(fabsf(headingAfter), 5.0f);
+  CHECK_LT(maxMoveAtRest, 1.0e-4f);                                   // nothing moves at rest
+  CHECK_LT(vec3Norm(vec3Sub(posAtRest, posBeforeTurn)), 0.06f);       // the path is not rotated (that would move it by about 1 m); a few cm come from the turn itself
+  CHECK_LT(0.45f, vec3Norm(posAtRest));                               // the 0.5 m move is kept as integrated
 }
 
 TEST(localizer_heading_observer_long_rest_refines_the_heading)

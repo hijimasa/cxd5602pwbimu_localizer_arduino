@@ -195,3 +195,23 @@ TEST(heading_observer_old_periods_lose_weight_against_a_changed_bias)
   CHECK_LT(0.95f * expectedYaw, yaw[1]);
   CHECK_LT(yaw[1], 1.02f * expectedYaw);
 }
+
+TEST(heading_observer_keeps_the_longest_rests_when_full)
+{
+  // A run of brief stops must not push the 60 s rest (or the alignment)
+  // out of the store: the lightest period is replaced, not the oldest.
+  const Quat truth = tiltedAttitude(5.0f);
+  HeadingObserver obs;
+  obs.reset(BIAS, LOCALIZER_LATITUDE_DEG, LOCALIZER_EARTH_RATE);
+  obs.addPeriod(restMean(truth, BIAS), 60.0f, truth);
+  for (int i = 0; i < 3 * HEADING_OBSERVER_PERIODS; i++)
+  {
+    obs.advance(1.0f);
+    obs.addPeriod(restMean(truth, BIAS), 2.5f, truth);
+  }
+  CHECK(obs.status().periods == HEADING_OBSERVER_PERIODS);
+  bool longKept = false;
+  for (int i = 0; i < obs.periodCount(); i++)
+    if (obs.period(i).duration == 60.0f) longKept = true;
+  CHECK(longKept);
+}

@@ -25,9 +25,10 @@
  * heading follows the data; e.g. resting once with the x axis East and once
  * with it West separates a y-axis bias from the earth rate completely.
  *
- * The localizer applies the yaw correction as a slow rotation of its frame
- * about Up (attitude and integrated position alike) and reports it back
- * with applyYaw() so that the stored attitudes stay in the current frame.
+ * The localizer applies the yaw correction as a slow rotation of the
+ * attitude about Up and reports it back with applyYaw() so that the stored
+ * attitudes stay in the current frame. The integrated position is not
+ * rotated (see localizer.cpp).
  */
 #ifndef HEADING_OBSERVER_H
 #define HEADING_OBSERVER_H
@@ -113,9 +114,9 @@ public:
     float age;      // s since the period ended
     Quat attitude;  // sensor relative to Earth, in the current (corrected) frame
   };
-  /** Stored periods, oldest first (diagnostics). */
+  /** Stored periods in slot order (diagnostics). */
   int periodCount() const { return count_; }
-  const Period &period(int i) const { return periods_[(next_ - count_ + i + HEADING_OBSERVER_PERIODS) % HEADING_OBSERVER_PERIODS]; }
+  const Period &period(int i) const { return periods_[i]; }
   /** Expected gyro mean at rest for an attitude with the current bias. */
   Vec3 expectedMean(Quat attitude) const;
 
@@ -126,7 +127,6 @@ private:
 
   Period periods_[HEADING_OBSERVER_PERIODS];
   int count_;
-  int next_;
 
   // The period in progress: committed samples plus a short tail held back
   // in chunks, so that the start of the next motion (which the ZUPT
