@@ -33,6 +33,7 @@
 #define MSG_ID_RESET 0x04         // MainCore -> SubCore: restart the localizer (re-calibrate)
 #define MSG_ID_POSITION 0x05      // SubCore -> MainCore: pointer to PositionData_t
 #define MSG_ID_STATS 0x12         // SubCore -> MainCore: pointer to ProcessingStats_t
+#define MSG_ID_HEADING 0x13       // SubCore -> MainCore: pointer to HeadingStatus_t (with the stats)
 
 // SubCore IDs
 #define SUBCORE_LOCALIZER 1
@@ -102,6 +103,23 @@ typedef struct
   float gyro_offset[3];       // initial gyro offset estimate (rad/s)
   float accel_bias_preset[3]; // preset in use (m/s^2)
 } ProcessingStats_t;
+
+/**
+ * @brief Heading observer status (SubCore -> MainCore, with the stats).
+ * Gyro-compass re-estimation of heading and gyro bias at rest; only active
+ * with a gyro bias preset.
+ */
+typedef struct
+{
+  uint8_t active;         // 0 = no gyro preset, the observer is idle
+  uint8_t periods;        // stationary periods used by the fit
+  float yaw_applied;      // rad, total heading correction applied since start-up
+  float yaw_pending;      // rad, correction still being applied
+  float bias[3];          // rad/s, current gyro bias estimate (sensor frame)
+  float rate_magnitude;   // rad/s, |mean - bias| of the latest rest (earth rate when consistent)
+  float residual_rms;     // rad/s, fit residual over the stored rests
+  uint32_t rejected;      // rests rejected because the mean was not a rest
+} HeadingStatus_t;
 
 /* -------------------------------------------------------------------------
  * Raw log frames (MainCore built with -DRAW_LOG_OUTPUT).

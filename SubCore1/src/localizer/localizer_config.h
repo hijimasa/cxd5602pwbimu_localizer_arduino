@@ -62,6 +62,35 @@
 #define FUSION_BIAS_STATIONARY_THRESHOLD 3.0f // deg/s
 #define FUSION_BIAS_STATIONARY_PERIOD 5.0f    // s
 
+// ---- Heading observer (gyro-compass re-estimation at rest) -----------------
+// Needs the gyro bias preset. The gyro means of the recent stationary
+// periods are fitted for bias and heading (heading_observer.h); the result
+// is applied as a slow rotation about Up. Each period is weighted by its
+// length relative to the noise of a HEADING_OBSERVER_NOISE_PERIOD mean, the
+// preset is a prior with HEADING_OBSERVER_PRESET_SIGMA. Periods are not
+// trusted beyond HEADING_OBSERVER_MAX_PERIOD (bias instability) and lose
+// weight with age (temperature drift).
+#define HEADING_OBSERVER_ENABLED 1
+#define HEADING_OBSERVER_PERIODS 8               // stationary periods remembered
+#define HEADING_OBSERVER_MIN_PERIOD 2.0f         // s, shorter stops are not used
+#define HEADING_OBSERVER_MAX_PERIOD 60.0f        // s
+#define HEADING_OBSERVER_MEMORY 600.0f           // s, age constant of the period weight
+#define HEADING_OBSERVER_NOISE_PERIOD 3.0f       // s
+#define HEADING_OBSERVER_MEAN_NOISE (0.0005f * LOCALIZER_PI / 180.0f)  // rad/s, noise of a 3 s gyro mean (measured on the board)
+#define HEADING_OBSERVER_PRESET_SIGMA (0.002f * LOCALIZER_PI / 180.0f) // rad/s, how far the preset may be off
+#define HEADING_OBSERVER_MAX_RESIDUAL (0.03f * LOCALIZER_PI / 180.0f)  // rad/s, |mean - bias| above this was not a rest
+#define HEADING_OBSERVER_SOLVE_INTERVAL (LOCALIZER_SAMPLE_RATE / 2)    // samples between fits while at rest (0.5 s)
+#define HEADING_OBSERVER_CORRECTION_TIME 5.0f    // s, time constant of the applied rotation
+#define HEADING_OBSERVER_MAX_RATE (15.0f * LOCALIZER_PI / 180.0f)      // rad/s, slew limit of the applied rotation
+// The ZUPT detector confirms a rest while the last fraction of a degree of
+// a turn is still settling and notices the next motion only after its
+// window, so the first HEADING_OBSERVER_HEAD_SAMPLES and the last
+// HEADING_OBSERVER_TAIL_CHUNKS * HEADING_OBSERVER_TAIL_CHUNK samples of a
+// rest are left out of its mean.
+#define HEADING_OBSERVER_HEAD_SAMPLES (LOCALIZER_SAMPLE_RATE * 3 / 10)  // 0.3 s
+#define HEADING_OBSERVER_TAIL_CHUNK (LOCALIZER_SAMPLE_RATE / 10)         // samples per chunk (0.1 s)
+#define HEADING_OBSERVER_TAIL_CHUNKS 3
+
 // ---- ZUPT (zero velocity update) detection ---------------------------------
 // Two conditions over a short window, both must hold for ZUPT_REQUIRED_SAMPLES:
 //  * variance (sum over axes) below threshold: no vibration / jerk

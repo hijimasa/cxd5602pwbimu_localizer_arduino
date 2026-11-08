@@ -7,7 +7,9 @@
  *     accumulated and used for initial attitude, gyro offset and accel bias.
  *  2. RUNNING: Gaussian pre-filter -> earth-rate compensation -> Fusion AHRS
  *     -> gravity removal & bias correction -> ZUPT detection -> bias learning
- *     -> trapezoidal velocity/position integration.
+ *     -> trapezoidal velocity/position integration
+ *     -> heading observer (gyro-compass re-estimation at rest, needs the
+ *        gyro bias preset).
  */
 #ifndef LOCALIZER_H
 #define LOCALIZER_H
@@ -19,6 +21,7 @@
 #include "gaussian_filter.h"
 #include "zupt_detector.h"
 #include "velocity_integrator.h"
+#include "heading_observer.h"
 
 extern "C"
 {
@@ -81,8 +84,21 @@ public:
   const LocalizerDiagnostics &diagnostics() const { return diag_; }
   Vec3 accelBias() const { return accelBias_; }
 
-  /** Current run-time gyro offset estimate (rad/s), tracked by FusionBias. */
+  /**
+   * Current run-time gyro offset estimate (rad/s): the heading observer's
+   * bias when it is active, otherwise the FusionBias tracker.
+   */
   Vec3 gyroOffsetEstimate() const;
+
+  /**
+   * Enable/disable the heading observer (enabled by default; only active
+   * with a gyro bias preset). While at rest the gyro mean is fitted for
+   * bias and heading and the attitude and position are slowly rotated
+   * about Up towards the gyro-compass heading.
+   */
+  void setHeadingObserver(bool enabled) { headingObserverEnabled_ = enabled; }
+  bool headingObserverActive() const { return headingObserverEnabled_ && hasGyroBiasPreset_; }
+  const HeadingObserver &headingObserver() const { return headingObserver_; }
   uint32_t calibrationProgress() const { return alignmentAccumulator_.sampleCount(); }
   uint32_t calibrationRequired() const { return alignmentAccumulator_.requiredSamples(); }
 
@@ -154,6 +170,9 @@ private:
   FusionBias bias_;
   ZuptDetector zupt_;
   VelocityIntegrator integrator_;
+  HeadingObserver headingObserver_;
+  bool headingObserverEnabled_;
+  uint32_t observerSolveCounter_;
 
   Vec3 accelBias_;
   Vec3 accelBiasPreset_;

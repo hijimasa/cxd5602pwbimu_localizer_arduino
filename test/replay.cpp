@@ -5,7 +5,7 @@
  *
  * Usage: replay LOG.bin [--csv OUT.csv] [--calib-seconds S] [--no-earth-rate]
  *                       [--no-gain-schedule] [--no-retro] [--no-bias-learning]
- *                       [--no-preset] [--preset BX BY BZ] [--gyro-preset GX GY GZ]
+ *                       [--no-preset] [--preset BX BY BZ] [--gyro-preset GX GY GZ] [--no-heading-observer]
  *
  * --preset takes the accelerometer bias in m/s^2, --gyro-preset the gyro
  * bias in deg/s; both override the values stored in the recording.
@@ -26,7 +26,7 @@ int main(int argc, char **argv)
 {
   if (argc < 2)
   {
-    std::fprintf(stderr, "usage: %s LOG.bin [--csv OUT.csv] [--calib-seconds S] [--no-earth-rate] [--no-gain-schedule] [--no-retro] [--no-bias-learning] [--no-preset] [--preset BX BY BZ] [--gyro-preset GX GY GZ]\n", argv[0]);
+    std::fprintf(stderr, "usage: %s LOG.bin [--csv OUT.csv] [--calib-seconds S] [--no-earth-rate] [--no-gain-schedule] [--no-retro] [--no-bias-learning] [--no-preset] [--preset BX BY BZ] [--gyro-preset GX GY GZ] [--no-heading-observer]\n", argv[0]);
     return 2;
   }
   const char *csvPath = nullptr;
@@ -41,6 +41,7 @@ int main(int argc, char **argv)
     else if (!std::strcmp(argv[i], "--no-retro")) loc.setRetroactiveCorrection(false);
     else if (!std::strcmp(argv[i], "--no-bias-learning")) loc.setBiasLearning(false);
     else if (!std::strcmp(argv[i], "--no-preset")) noPreset = true;
+    else if (!std::strcmp(argv[i], "--no-heading-observer")) loc.setHeadingObserver(false);
     else if (!std::strcmp(argv[i], "--preset") && i + 3 < argc)
     {
       const float x = (float)std::atof(argv[++i]), y = (float)std::atof(argv[++i]), z = (float)std::atof(argv[++i]);
@@ -178,6 +179,29 @@ int main(int argc, char **argv)
     {
       std::printf("device vs host: %u frames compared, max position diff %.6f m, max quaternion diff %.6f\n",
                   deviceCompared, maxDevicePosDiff, maxDeviceQuatDiff);
+    }
+    if (loc.headingObserverActive())
+    {
+      const HeadingObserver &o = loc.headingObserver();
+      const HeadingObserverStatus &h = o.status();
+      const Vec3 preset = loc.gyroBiasPreset();
+      std::printf("heading observer: %d rests, correction %+.2f deg applied (%+.2f pending), %u fits, %u rests rejected\n",
+                  h.periods, h.yawApplied * 57.2958f, h.yawPending * 57.2958f, h.solves, h.rejectedPeriods);
+      std::printf("  gyro bias [%.5f %.5f %.5f] deg/s (preset [%.5f %.5f %.5f], difference [%.5f %.5f %.5f]), fit residual %.5f deg/s, horizontal rate seen %.2f x earth\n",
+                  h.bias.x * 57.2958f, h.bias.y * 57.2958f, h.bias.z * 57.2958f,
+                  preset.x * 57.2958f, preset.y * 57.2958f, preset.z * 57.2958f,
+                  (h.bias.x - preset.x) * 57.2958f, (h.bias.y - preset.y) * 57.2958f, (h.bias.z - preset.z) * 57.2958f,
+                  h.residualRms * 57.2958f, h.yawScale);
+      for (int i = 0; i < o.periodCount(); i++)
+      {
+        const HeadingObserver::Period &pd = o.period(i);
+        const Vec3 r = vec3Sub(pd.mean, h.bias);
+        const Vec3 up = quatRotateEarthToSensor(pd.attitude, vec3(0, 0, 1));
+        const Vec3 x = quatRotateSensorToEarth(pd.attitude, vec3(1, 0, 0));
+        std::printf("  rest %d: %.1f s, sensor x heading %.1f deg (0 = North, 90 = West), earth rate seen %.2f deg/h (vertical %.2f, expected %.2f / %.2f)\n",
+                    i, pd.duration, atan2f(x.y, x.x) * 57.2958f, vec3Norm(r) * 57.2958f * 3600.0f, vec3Dot(r, up) * 57.2958f * 3600.0f,
+                    LOCALIZER_EARTH_RATE * 57.2958f * 3600.0f, LOCALIZER_EARTH_RATE * sinf(LOCALIZER_LATITUDE_DEG * LOCALIZER_PI / 180.0f) * 57.2958f * 3600.0f);
+      }
     }
   }
   return 0;

@@ -40,6 +40,7 @@ static uint32_t output_index = 0;
 static int output_divider = 0;
 
 static ProcessingStats_t stats_ring[2];
+static HeadingStatus_t heading_ring[2];
 static uint32_t stats_index = 0;
 static uint32_t last_stats_time = 0;
 static uint32_t stats_samples_start = 0;
@@ -111,6 +112,21 @@ static void sendStats(uint32_t now)
   s.accel_bias_preset[1] = preset.y;
   s.accel_bias_preset[2] = preset.z;
   MP.Send(MSG_ID_STATS, &s, 0);
+
+  HeadingStatus_t &h = heading_ring[stats_index % 2];
+  const HeadingObserverStatus &o = localizer.headingObserver().status();
+  h.active = localizer.headingObserverActive() ? 1 : 0;
+  h.periods = (uint8_t)o.periods;
+  h.yaw_applied = o.yawApplied;
+  h.yaw_pending = o.yawPending;
+  h.bias[0] = o.bias.x;
+  h.bias[1] = o.bias.y;
+  h.bias[2] = o.bias.z;
+  h.rate_magnitude = o.rateMagnitude;
+  h.residual_rms = o.residualRms;
+  h.rejected = o.rejectedPeriods;
+  MP.Send(MSG_ID_HEADING, &h, 0);
+
   stats_samples_start = d.samplesProcessed;
   last_stats_time = now;
 }

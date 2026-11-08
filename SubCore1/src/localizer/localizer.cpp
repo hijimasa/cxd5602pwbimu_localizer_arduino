@@ -9,6 +9,7 @@ Localizer::Localizer()
   earthRateCompensation_ = true;
   biasLearning_ = true;
   gainScheduling_ = true;
+  headingObserverEnabled_ = HEADING_OBSERVER_ENABLED != 0;
   accelBiasPreset_ = vec3Zero(); // survives reset(): it is a device constant
   gyroBiasPreset_ = vec3Zero();
   hasGyroBiasPreset_ = false;
@@ -49,6 +50,8 @@ void Localizer::reset()
 
   zupt_.reset();
   integrator_.reset();
+  headingObserver_.reset(gyroBiasPreset_, LOCALIZER_LATITUDE_DEG, LOCALIZER_EARTH_RATE);
+  observerSolveCounter_ = 0;
 
   accelBias_ = vec3Zero();
   earthRateNwu_ = earthRateNwu(LOCALIZER_LATITUDE_DEG, LOCALIZER_EARTH_RATE);
@@ -75,6 +78,7 @@ void Localizer::reset()
 
 Vec3 Localizer::gyroOffsetEstimate() const
 {
+  if (headingObserverActive()) return headingObserver_.bias();
   const FusionVector offset = FusionBiasGetOffset(&bias_);
   return vec3(offset.axis.x * DEG_TO_RAD_F, offset.axis.y * DEG_TO_RAD_F, offset.axis.z * DEG_TO_RAD_F);
 }
@@ -117,6 +121,16 @@ void Localizer::startRunning(const ImuSample &sample)
   FusionBiasSetOffset(&bias_, offset);
 
   accelBias_ = alignment_.accelBias;
+
+  // The alignment is the first stationary period of the heading observer.
+  headingObserver_.reset(gyroBiasPreset_, LOCALIZER_LATITUDE_DEG, LOCALIZER_EARTH_RATE);
+  if (headingObserverActive())
+  {
+    headingObserver_.addPeriod(alignment_.meanGyro,
+                               (float)alignmentAccumulator_.requiredSamples() / LOCALIZER_SAMPLE_RATE,
+                               alignment_.quaternion);
+    headingObserver_.solve(alignment_.quaternion);
+  }
 
   // The first running sample uses the nominal dt.
   lastTimestamp_ = sample.timestamp;
@@ -193,9 +207,23 @@ void Localizer::processRunning(const ImuSample &sample)
     gyroComp = vec3Sub(gyroComp, quatRotateEarthToSensor(state_.quaternion, earthRateNwu_));
   }
 
-  // 3. Run-time gyro offset tracking (Fusion works in deg/s)
-  FusionVector gyroscope = {{gyroComp.x * RAD_TO_DEG_F, gyroComp.y * RAD_TO_DEG_F, gyroComp.z * RAD_TO_DEG_F}};
-  gyroscope = FusionBiasUpdate(&bias_, gyroscope);
+  // 3. Run-time gyro offset (Fusion works in deg/s). With the heading
+  //    observer the offset is its bias estimate; FusionBias would otherwise
+  //    absorb the residual of a wrong heading at rest and freeze the error.
+  const bool observer = headingObserverActive();
+  FusionVector gyroscope;
+  if (observer)
+  {
+    const Vec3 g = vec3Sub(gyroComp, headingObserver_.bias());
+    gyroscope.axis.x = g.x * RAD_TO_DEG_F;
+    gyroscope.axis.y = g.y * RAD_TO_DEG_F;
+    gyroscope.axis.z = g.z * RAD_TO_DEG_F;
+  }
+  else
+  {
+    const FusionVector raw = {{gyroComp.x * RAD_TO_DEG_F, gyroComp.y * RAD_TO_DEG_F, gyroComp.z * RAD_TO_DEG_F}};
+    gyroscope = FusionBiasUpdate(&bias_, raw);
+  }
 
   // 4. AHRS update (accelerometer in g, without bias correction so the
   //    attitude tracks the measured gravity direction)
@@ -253,6 +281,39 @@ void Localizer::processRunning(const ImuSample &sample)
 
   // 8. Velocity / position integration
   integrator_.update(earthAccel, dt, stationary, zupt_.stillSamples() * LOCALIZER_NOMINAL_DT);
+
+  // 9. Heading observer: fit bias and heading from the rest periods and
+  //    turn the frame (attitude and path) slowly about Up
+  if (observer)
+  {
+    headingObserver_.advance(dt);
+    if (stationary)
+    {
+      headingObserver_.addStationary(gyroF, dt);
+      if (++observerSolveCounter_ >= HEADING_OBSERVER_SOLVE_INTERVAL)
+      {
+        observerSolveCounter_ = 0;
+        headingObserver_.solve(q);
+      }
+      float delta = headingObserver_.pendingYaw() * dt / HEADING_OBSERVER_CORRECTION_TIME;
+      const float limit = HEADING_OBSERVER_MAX_RATE * dt;
+      if (delta > limit) delta = limit;
+      if (delta < -limit) delta = -limit;
+      if (delta != 0.0f)
+      {
+        q = quatNormalise(quatMultiply(quatAboutUp(delta), q));
+        const FusionQuaternion fq2 = {{q.w, q.x, q.y, q.z}};
+        FusionAhrsSetQuaternion(&ahrs_, fq2);
+        integrator_.rotateAboutUp(delta);
+        headingObserver_.applyYaw(delta);
+      }
+    }
+    else
+    {
+      observerSolveCounter_ = 0;
+      headingObserver_.endPeriod(q);
+    }
+  }
 
   state_.timestamp = sample.timestamp;
   state_.quaternion = q;

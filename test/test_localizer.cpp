@@ -14,6 +14,8 @@ struct RunResult
   float finalTiltErrorDeg = 0.0f;
   float finalHeadingDriftDeg = 0.0f;
   float finalPositionError = 0.0f; // in the initial-heading-aligned frame (see below)
+  float finalHeadingErrorDeg = 0.0f;   // signed, against the truth
+  float finalPositionErrorTrueFrame = 0.0f; // against the truth as is (needs a correct heading)
   float maxSpeedErrorWhileStill = 0.0f;
   bool stationaryAtEnd = false;
   uint32_t runningSamples = 0;
@@ -82,6 +84,8 @@ static RunResult runSimulation(Localizer &loc, const SimConfig &cfg, const Traje
     // gyro-compass alignment (gyro bias vs. earth rate). Position accuracy
     // is therefore judged after removing the initial heading error.
     r.finalPositionError = vec3Norm(vec3Sub(rotateZ(st.position, -r.initialHeadingErrorDeg), truth.position));
+    r.finalHeadingErrorDeg = headErr;
+    r.finalPositionErrorTrueFrame = vec3Norm(vec3Sub(st.position, truth.position));
     r.stationaryAtEnd = st.stationary;
   }
   return r;
@@ -427,20 +431,142 @@ TEST(localizer_drifted_gyro_preset_does_not_drift_attitude)
 {
   // The preset is used for the heading only; a preset that no longer fits
   // (0.001 deg/s off, a few degrees of temperature change) must leave the
-  // attitude at rest as stable as without any preset.
+  // attitude at rest as stable as without any preset. With the heading
+  // observer the heading is a live gyro-compass estimate (it follows the
+  // mean of the rest, a few degrees of noise); without it the heading is
+  // frozen at the alignment.
   SimConfig cfg = realisticNoise();
   cfg.gyroBias = vec3(1.1e-4f, -0.9e-4f, -4.1e-4f);
+  const Vec3 drifted = vec3Add(cfg.gyroBias, vec3(1.2e-5f, -1.0e-5f, 0.8e-5f));
   Localizer reference;
   const RunResult a = runSimulation(reference, cfg, stationaryTrajectory(tilted()), 60.0);
-  Localizer drifted;
-  drifted.setGyroBiasPreset(vec3Add(cfg.gyroBias, vec3(1.2e-5f, -1.0e-5f, 0.8e-5f)), true);
-  const RunResult b = runSimulation(drifted, cfg, stationaryTrajectory(tilted()), 60.0);
+  Localizer frozen;
+  frozen.setHeadingObserver(false);
+  frozen.setGyroBiasPreset(drifted, true);
+  const RunResult b = runSimulation(frozen, cfg, stationaryTrajectory(tilted()), 60.0);
+  Localizer live;
+  live.setGyroBiasPreset(drifted, true);
+  const RunResult c = runSimulation(live, cfg, stationaryTrajectory(tilted()), 180.0);
+  // At a single heading the gyro-compass cannot tell the preset error from
+  // the earth rate: the heading it converges to is off by the angle between
+  // the horizontal parts of the earth rate and of (earth rate + error).
+  const Quat truth = tilted();
+  const Vec3 up = quatRotateEarthToSensor(truth, vec3(0, 0, 1));
+  const Vec3 e = quatRotateEarthToSensor(truth, earthRateNwu(cfg.latitudeDeg, cfg.earthRate));
+  const Vec3 rr = vec3Add(e, vec3Sub(cfg.gyroBias, drifted));
+  const Vec3 eh = vec3Sub(e, vec3Scale(up, vec3Dot(e, up)));
+  const Vec3 rh = vec3Sub(rr, vec3Scale(up, vec3Dot(rr, up)));
+  const float limitDeg = atan2f(vec3Dot(up, vec3Cross(rh, eh)), vec3Dot(rh, eh)) * DEG;
   METRIC("heading drift without preset (deg)", a.maxHeadingDriftDeg);
-  METRIC("heading drift with drifted preset (deg)", b.maxHeadingDriftDeg);
-  METRIC("tilt error with drifted preset (deg)", b.maxTiltErrorDeg);
+  METRIC("heading drift with drifted preset, observer off (deg)", b.maxHeadingDriftDeg);
+  METRIC("initial heading error with drifted preset (deg)", c.initialHeadingErrorDeg);
+  METRIC("heading drift with drifted preset, observer on (deg)", c.maxHeadingDriftDeg);
+  METRIC("final heading error, observer on (deg)", c.finalHeadingErrorDeg);
+  METRIC("single-heading limit of this preset error (deg)", limitDeg);
+  METRIC("tilt error with drifted preset (deg)", c.maxTiltErrorDeg);
   CHECK_LT(b.maxHeadingDriftDeg, a.maxHeadingDriftDeg + 0.02f);
   CHECK_LT(b.maxHeadingDriftDeg, 0.1f);
-  CHECK_LT(b.maxTiltErrorDeg, 0.3f);
-  CHECK_LT(b.maxSpeedErrorWhileStill, 0.01f);
-  CHECK_LT(b.finalPositionError, 0.002f);
+  // the 180 s estimate sits at the limit, within the noise of the mean (about 1.4 deg)
+  CHECK_LT(fabsf(wrapDeg(c.finalHeadingErrorDeg - limitDeg)), 4.5f);
+  CHECK_LT(c.maxHeadingDriftDeg, 8.0f);
+  for (const RunResult *r : {&b, &c})
+  {
+    CHECK_LT(r->maxTiltErrorDeg, 0.3f);
+    CHECK_LT(r->maxSpeedErrorWhileStill, 0.01f);
+    CHECK_LT(r->finalPositionError, 0.002f);
+  }
+}
+
+/** Rotation about the body z axis from t0, then a translation from t1 (Earth frame). */
+static TrajectoryFn turnThenTranslate(Quat attitude0, double t0, double turnDuration, float angle,
+                                      double t1, double moveDuration, Vec3 displacement)
+{
+  const TrajectoryFn turn = rotationTrajectory(attitude0, t0, turnDuration, vec3(0, 0, 1), angle);
+  const Quat attitude1 = quatMultiply(attitude0, quatFromAxisAngle(vec3(0, 0, 1), angle));
+  const TrajectoryFn move = translationTrajectory(attitude1, t1, moveDuration, displacement);
+  return [=](double t) { return t < t1 ? turn(t) : move(t); };
+}
+
+TEST(localizer_heading_observer_resolves_east_west_after_a_turn)
+{
+  // The user's symptom: the y-axis preset is off by 0.006 deg/s, more than
+  // the horizontal earth rate, so the alignment with x East reads the
+  // mirror image (x West, 180 deg off). After a 180 deg turn and a rest the
+  // observer sees both headings, separates the bias and turns the frame
+  // to the true heading; the path integrated afterwards is right in the
+  // Earth frame, not only relative to the start.
+  SimConfig cfg = realisticNoise();
+  cfg.gyroBias = vec3(1.1e-4f, -0.9e-4f, -4.1e-4f);
+  const Vec3 preset = vec3Add(cfg.gyroBias, vec3(0.0f, 0.006f / DEG, 0.0f));
+  const Quat xEast = quatFromAxisAngle(vec3(0, 0, 1), -90.0f / DEG);
+  const TrajectoryFn traj = turnThenTranslate(xEast, 25.0, 3.0, 180.0f / DEG, 70.0, 2.0, vec3(0.5f, 0, 0));
+  Localizer with;
+  with.setGyroBiasPreset(preset, true);
+  const RunResult a = runSimulation(with, cfg, traj, 80.0);
+  Localizer without;
+  without.setHeadingObserver(false);
+  without.setGyroBiasPreset(preset, true);
+  const RunResult b = runSimulation(without, cfg, traj, 80.0);
+  const HeadingObserverStatus &st = with.headingObserver().status();
+  METRIC("initial heading error (deg)", a.initialHeadingErrorDeg);
+  METRIC("final heading error with observer (deg)", a.finalHeadingErrorDeg);
+  METRIC("final heading error without observer (deg)", b.finalHeadingErrorDeg);
+  METRIC("final position error in the Earth frame, with (m)", a.finalPositionErrorTrueFrame);
+  METRIC("final position error in the Earth frame, without (m)", b.finalPositionErrorTrueFrame);
+  METRIC("bias error of the observer (deg/s)", vec3Norm(vec3Sub(st.bias, cfg.gyroBias)) * DEG);
+  METRIC("bias error x (deg/s)", (st.bias.x - cfg.gyroBias.x) * DEG);
+  METRIC("bias error y (deg/s)", (st.bias.y - cfg.gyroBias.y) * DEG);
+  METRIC("bias error z (deg/s)", (st.bias.z - cfg.gyroBias.z) * DEG);
+  METRIC("total yaw applied (deg)", st.yawApplied * DEG);
+  METRIC("periods stored", st.periods);
+  METRIC("max tilt error (deg)", a.maxTiltErrorDeg);
+  CHECK_LT(150.0f, fabsf(a.initialHeadingErrorDeg));
+  CHECK_LT(150.0f, fabsf(b.finalHeadingErrorDeg));
+  CHECK_LT(fabsf(a.finalHeadingErrorDeg), 4.0f);
+  CHECK_LT(vec3Norm(vec3Sub(st.bias, cfg.gyroBias)) * DEG, 0.0006f); // three 15-45 s means: about 0.0002 deg/s of noise
+  CHECK_LT(a.finalPositionErrorTrueFrame, 0.05f);
+  CHECK_LT(0.9f, b.finalPositionErrorTrueFrame); // the mirror image path: about 1 m off
+  CHECK_LT(a.maxTiltErrorDeg, 0.5f);
+  CHECK(a.stationaryAtEnd);
+  CHECK(st.periods >= 2);
+}
+
+TEST(localizer_heading_observer_long_rest_refines_the_heading)
+{
+  // Exact preset, 120 s at rest: the heading must end closer to the truth
+  // than the 15 s alignment noise allows and the attitude/position at rest
+  // must stay as good as without the observer.
+  SimConfig cfg = realisticNoise();
+  cfg.gyroBias = vec3(1.1e-4f, -0.9e-4f, -4.1e-4f);
+  Localizer loc;
+  loc.setGyroBiasPreset(cfg.gyroBias, true);
+  const RunResult r = runSimulation(loc, cfg, stationaryTrajectory(tilted()), 120.0);
+  const HeadingObserverStatus &st = loc.headingObserver().status();
+  METRIC("initial heading error (deg)", r.initialHeadingErrorDeg);
+  METRIC("final heading error (deg)", r.finalHeadingErrorDeg);
+  METRIC("max heading change (deg)", r.maxHeadingDriftDeg);
+  METRIC("bias error of the observer (deg/s)", vec3Norm(vec3Sub(st.bias, cfg.gyroBias)) * DEG);
+  METRIC("earth rate seen (deg/h, expected 15.04)", st.rateMagnitude * DEG * 3600.0f);
+  METRIC("max tilt error (deg)", r.maxTiltErrorDeg);
+  CHECK_LT(fabsf(r.finalHeadingErrorDeg), 2.0f);
+  CHECK_LT(r.maxHeadingDriftDeg, 6.0f);
+  CHECK_LT(r.maxTiltErrorDeg, 0.3f);
+  CHECK_LT(r.maxSpeedErrorWhileStill, 0.01f);
+  CHECK_LT(r.finalPositionError, 0.002f);
+  CHECK_LT(vec3Norm(vec3Sub(st.bias, cfg.gyroBias)) * DEG, 0.0005f);
+  CHECK(r.stationaryAtEnd);
+}
+
+TEST(localizer_heading_observer_is_idle_without_a_preset)
+{
+  // No preset: nothing to anchor the bias, the observer must not act and
+  // the run must be identical to the observer-less one.
+  Localizer a, b;
+  b.setHeadingObserver(false);
+  const RunResult ra = runSimulation(a, realisticNoise(), translationTrajectory(LEVEL, 17.0, 2.0, vec3(1, 0, 0)), 25.0);
+  const RunResult rb = runSimulation(b, realisticNoise(), translationTrajectory(LEVEL, 17.0, 2.0, vec3(1, 0, 0)), 25.0);
+  CHECK(!a.headingObserverActive());
+  CHECK(a.headingObserver().status().periods == 0);
+  CHECK_NEAR(vec3Norm(vec3Sub(ra.last.position, rb.last.position)), 0.0f, 0.0f);
+  CHECK_NEAR(ra.last.quaternion.w, rb.last.quaternion.w, 0.0f);
 }

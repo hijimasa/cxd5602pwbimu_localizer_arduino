@@ -32,6 +32,7 @@ IMU samples cross the core boundary through a 256-entry ring buffer (about 133 m
 - **High-speed acquisition:** 1920 Hz, the full performance of the IMU
 - **Gyro-compass initial alignment:** Up from the mean accelerometer vector, North from the horizontal component of the mean angular rate; the initial quaternion matches the Fusion NWU convention. With the gyro bias from the six-orientation calibration removed first, the heading is true north instead of arbitrary
 - **Initial gyro offset and earth-rate compensation:** the mean angular rate minus the expected earth rotation seeds the gyro offset; while running, the earth rotation is continuously removed using the current attitude
+- **Heading observer (gyro-compass re-estimation at rest):** with the gyro preset, every rest is used to re-fit the gyro bias and the heading from the earth rotation; the attitude and the path are turned slowly towards the result. Rests at two or more headings separate a drifted bias from the earth rate, so a wrong start-up heading (for example the East/West mirror image a bias error larger than the horizontal earth rate produces) is corrected after a turn and a stop
 - **Fusion AHRS:** acceleration rejection and gravity removal
 - **ZUPT (variance + mean):** besides the signal variance, the window mean of acceleration and angular rate is checked, so a smooth acceleration is not mistaken for rest; while the estimated speed is large the confirmation period is extended to survive short constant-velocity phases
 - **AHRS gain scheduling:** high gain while stationary for fast convergence, low gain during motion so that linear acceleration does not tilt the attitude
@@ -152,6 +153,7 @@ The suite covers:
 - ring buffer: no loss within capacity, overrun detection, concurrent producer/consumer
 - end-to-end regression scenarios with synthetic IMU data (noise, bias, earth rotation): stationary, tilted start, rotation, translation, timestamp wrap-around, dt on lost samples
 - six-orientation fits: accelerometer sphere fit and gyro earth-rotation fit (synthetic faces with random headings, the real board's means, degenerate orientation sets), gyro preset restores north and cannot cause drift when it is off, raw-log frame parsing
+- heading observer: single rest reproduces the gyro-compass, East/West rests separate a y-axis bias error from the earth rate, the vertical bias is observable at one heading, rests contaminated by a turn are dropped, ageing of old rests; end to end, a 180° wrong start-up heading is corrected to 2.5° after a turn and a rest (Earth-frame path error 3 cm instead of 97 cm), a 180 s rest refines the heading, the observer is idle without a preset
 
 Every scenario prints its current performance figures as `metric` lines. Tighten the bounds as the algorithm improves; never loosen them.
 
@@ -231,6 +233,7 @@ cxd5602pwbimu_localizer_arduino/
 │           ├── initial_alignment.*       # initial attitude / offset / bias
 │           ├── accel_bias_fit.h          # six-orientation sphere fit (accelerometer)
 │           ├── gyro_bias_fit.h           # six-orientation earth-rotation fit (gyro)
+│           ├── heading_observer.*        # gyro-compass re-estimation of heading and bias at rest
 │           ├── gaussian_filter.*         # causal Gaussian filter
 │           ├── zupt_detector.*           # variance based ZUPT
 │           ├── velocity_integrator.*     # trapezoidal integration
@@ -267,7 +270,7 @@ cxd5602pwbimu_localizer_arduino/
 1. **dt:** from the IMU timestamp difference (32-bit wrap safe). Values above 1.5× nominal are counted as anomalies, values above 10× are clamped
 2. **Gaussian filter:** causal, σ = 2 samples, largest weight on the current sample
 3. **Earth-rate compensation:** the earth rotation vector is rotated into the sensor frame with the current attitude and subtracted from the angular rate
-4. **Gyro offset tracking:** FusionBias (offset updated only after 5 s below 3 °/s), seeded with the alignment result
+4. **Gyro offset tracking:** FusionBias (offset updated only after 5 s below 3 °/s), seeded with the alignment result. With the gyro preset the offset is the heading observer's bias estimate instead (step 11): FusionBias would absorb the residual of a wrong heading at rest and freeze the error
 5. **AHRS update:** Fusion (acceleration rejection 10°, gain scheduled in 7b)
 6. **Gravity removal and bias correction** in the sensor frame, then rotation into the Earth frame
 7. **ZUPT:** stationary when, over a 16-sample window, the variance is below the thresholds and the mean acceleration is below 0.1 m/s² and the mean angular rate below 2 °/s, for 96 consecutive samples (50 ms). While the estimated speed exceeds 0.1 m/s, 1 s of continuous stillness is required instead (a short constant-velocity phase in the middle of a move must not be taken for a stop). Leaving is immediate
@@ -275,6 +278,7 @@ cxd5602pwbimu_localizer_arduino/
 8. **Bias learning:** while stationary, the residual acceleration is learned with a 1 s time constant
 9. **Integration:** trapezoidal velocity and position; velocity is reset to zero while stationary
 10. **Retroactive ZUPT correction:** when a ZUPT is confirmed at the end of a motion segment of duration T, the remaining velocity v_err is error and is removed from the position: during the confirmation delay t_still the error velocity was constant (v_err × t_still), before that it is modelled as growing linearly (v_err × (T − t_still) / 2). To keep the output continuous the correction is spread linearly over the second after the ZUPT instead of being applied as a step (a further ZUPT during that time merges its correction). Segments in which the velocity limit was hit, or longer than 60 s, are not corrected
+11. **Heading observer** (only with the gyro preset): at rest the gyroscope measures bias + earth rotation in the sensor frame. The mean of every rest of at least 2 s (the first 0.3 s and the last 0.3 s are left out because the ZUPT detector lags the start and the end of a motion) is stored with the AHRS attitude at that time; the alignment is the first such rest. Every 0.5 s at rest the last 8 rests plus the one in progress are fitted by weighted least squares for the bias (3 unknowns) and the yaw error of the AHRS frame (cos/sin, held on the unit circle), with the preset as a prior (σ = 0.002 °/s) and each rest weighted by its length (noise of a mean ∝ 1/√T, capped at 60 s) and discounted with age (600 s constant, temperature drift). At a single heading the bias and the heading cannot be told apart and the prior decides: the result is the gyro-compass of the preset, as at start-up. Rests at different headings make the bias observable (it is fixed to the sensor, the earth rate turns with the heading): East then West, for example, gives the y-axis bias exactly. The yaw error is applied as a rotation about Up of the attitude and of the integrated velocity and position (the path stays rigid, the frame becomes true), with a 5 s time constant and a 15 °/s slew limit. The fit reports the earth rate it sees (15.04 °/h in total, 8.77 °/h vertical in Tokyo); a rest whose mean is more than 0.03 °/s from the bias was not a rest and is rejected
 
 ### Current performance on synthetic data (`metric` lines of `cd test && make`)
 
@@ -285,6 +289,7 @@ cxd5602pwbimu_localizer_arduino/
 | 2 m in 3 s | 8.3 mm |
 | 1 m in 4 s (slow, peak 0.36 m/s²) | 2.0 cm |
 | 90° turn in place | 1.5 cm, attitude error 0.03° |
+| Start-up heading 176° wrong (y-axis preset error 0.006 °/s), 180° turn, 42 s rest, 0.5 m move | heading 2.5°, Earth-frame position error 3 cm (97 cm without the observer) |
 
 ### Results on device recordings (`test/data/`, round trips back to the start)
 
@@ -303,7 +308,7 @@ With both the retroactive correction and the gain scheduling disabled the closur
 
 - **Constant-velocity motion longer than 1 s is indistinguishable from rest.** This is inherent to a stand-alone IMU; shorter coasting phases are handled by the speed-dependent confirmation time
 - **Slow motion** with accelerations around 0.1 m/s² sits at the mean-acceleration threshold and comes out short
-- **Gyro-compass accuracy depends on the gyro bias.** Without the six-orientation gyro preset the bias of this board (0.006 °/s horizontal) exceeds the horizontal earth rate (about 0.0034 °/s in Tokyo) and the initial heading is arbitrary. With the preset the heading noise of a 15 s alignment is about 5°, and a temperature change of a few °C since the calibration adds a comparable error (relative positioning is unaffected either way; the tests evaluate position error in the initial-heading-aligned frame). Modelling the temperature dependence of the bias is the next step
+- **Gyro-compass accuracy depends on the gyro bias.** Without the six-orientation gyro preset the bias of this board (0.006 °/s horizontal) exceeds the horizontal earth rate (about 0.0034 °/s in Tokyo) and the initial heading is arbitrary. With the preset the heading noise of a 15 s alignment is about 5°, and a temperature change of a few °C since the calibration adds a comparable error; a bias error above the horizontal earth rate even returns the mirror-image heading (x East and x West both read East). The heading observer removes the part of this that rests at different headings can observe: after a turn and a stop the bias is re-fitted and the heading corrected; at a single heading the observer can only average the noise down (about 2° after 60 s). Relative positioning is unaffected either way; the tests evaluate position error in the initial-heading-aligned frame unless the observer is under test. Modelling the temperature dependence of the bias is the next step
 - **Thresholds have not been tuned on real motion data.** The synthetic data includes noise, bias and earth rotation but not the real vibration signature. Recordings from the device can be replayed on the host (see below) to close this gap
 
 ## Configuration
@@ -325,6 +330,10 @@ Main parameters in `SubCore1/src/localizer/localizer_config.h`:
 | `ZUPT_SLOW_CONFIRM_SPEED` / `SAMPLES` | 0.1 m/s / 1 s | confirmation period while the estimated speed is large |
 | `ZUPT_RETROACTIVE_CORRECTION` | 1 | enable the retroactive ZUPT position correction |
 | `ZUPT_CORRECTION_BLEND_TIME` | 1.0 s | time over which the correction is spread (0 = instant) |
+| `HEADING_OBSERVER_ENABLED` | 1 | gyro-compass re-estimation at rest (needs the gyro preset) |
+| `HEADING_OBSERVER_PRESET_SIGMA` | 0.002 °/s | how far the preset may be off (prior of the bias fit) |
+| `HEADING_OBSERVER_MIN_PERIOD` / `MAX_PERIOD` / `MEMORY` | 2 s / 60 s / 600 s | shortest rest used, length beyond which a rest is not trusted more, age constant |
+| `HEADING_OBSERVER_CORRECTION_TIME` / `MAX_RATE` | 5 s / 15 °/s | how the heading correction is applied |
 | `IMU_RING_SIZE` (shared_types.h) | 256 | inter-core ring buffer length |
 | `IMU_NOTIFY_INTERVAL` (shared_types.h) | 8 | samples between wake-up notifications to SubCore1 (the receive FIFO has only 8 buffers) |
 

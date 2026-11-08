@@ -56,6 +56,9 @@ static ImuRing_t g_imu_ring;
 
 static ProcessingStats_t g_stats;
 static bool g_stats_valid = false;
+static HeadingStatus_t g_heading;
+static bool g_heading_valid = false;
+static float g_heading_reported = 0.0f; // yaw_applied at the last "# heading" message
 
 // ---- Calibration preset (flash) and guided six-orientation calibration ---
 // "accel_bias ax ay az" (m/s^2), "gyro_bias gx gy gz" (rad/s), "temperature t"
@@ -576,6 +579,23 @@ static void handleSubCoreMessages()
       writeRawFrame(RAW_LOG_TYPE_STATS, &g_stats, sizeof(ProcessingStats_t));
 #endif
     }
+    else if (msgid == MSG_ID_HEADING)
+    {
+      g_heading = *(const HeadingStatus_t *)msgdata;
+      g_heading_valid = true;
+#ifndef RAW_LOG_OUTPUT
+      // Tell the user when the gyro-compass moved the heading by more than
+      // a degree since the last report (every 5 s at most, with the stats).
+      if (g_calib_state == CALIB_IDLE && g_heading.active &&
+          fabsf(g_heading.yaw_applied - g_heading_reported) > 1.0f * 3.14159265f / 180.0f)
+      {
+        g_heading_reported = g_heading.yaw_applied;
+        Serial.printf("# heading: gyro-compass correction %+.1f deg in total (%+.1f deg pending), %u rests, gyro bias [%.4f %.4f %.4f] deg/s\n",
+                      g_heading.yaw_applied * 57.2958f, g_heading.yaw_pending * 57.2958f, (unsigned)g_heading.periods,
+                      g_heading.bias[0] * 57.2958f, g_heading.bias[1] * 57.2958f, g_heading.bias[2] * 57.2958f);
+      }
+#endif
+    }
   }
 }
 
@@ -612,6 +632,13 @@ void loop()
                     (unsigned long)g_stats.calibration_count, (unsigned long)g_stats.calibration_required,
                     g_stats.accel_bias[0], g_stats.accel_bias[1], g_stats.accel_bias[2],
                     g_stats.gyro_offset[0] * 57.2958f, g_stats.gyro_offset[1] * 57.2958f, g_stats.gyro_offset[2] * 57.2958f);
+      if (g_heading_valid && g_heading.active)
+      {
+        Serial.printf("  heading observer: %u rests, correction %+.1f deg applied (%+.1f pending), bias=[%.5f %.5f %.5f] deg/s, earth rate seen %.1f deg/h, residual %.5f deg/s, rejected %lu\n",
+                      (unsigned)g_heading.periods, g_heading.yaw_applied * 57.2958f, g_heading.yaw_pending * 57.2958f,
+                      g_heading.bias[0] * 57.2958f, g_heading.bias[1] * 57.2958f, g_heading.bias[2] * 57.2958f,
+                      g_heading.rate_magnitude * 57.2958f * 3600.0f, g_heading.residual_rms * 57.2958f, (unsigned long)g_heading.rejected);
+      }
     }
     else
     {
